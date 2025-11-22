@@ -3,6 +3,8 @@
 
 import ldn
 import trio
+import sys
+import binascii
 
 AcceptPolicies = {
 	ldn.ACCEPT_ALL: "ALL",
@@ -22,7 +24,8 @@ Platforms = {
 }
 
 async def main():
-	networks = await ldn.scan()
+	keys = sys.argv[1]
+	networks = await ldn.scan(protocol=1, keys=keys)
 	
 	print("Found %i network(s)" %len(networks))
 	for i, network in enumerate(networks):
@@ -34,6 +37,7 @@ async def main():
 		print("\tStation accept policy: %s" %AcceptPolicies[network.accept_policy])
 		print("\tMaximum number of participants: %i" %network.max_participants)
 		print("\tApplication data: <%i bytes>" %len(network.application_data))
+		print(binascii.hexlify(network.application_data).decode('utf-8'))
 		print()
 		print("\tHost address: %s" %network.address)
 		print("\tWLAN band: %s" %BandNames[network.band])

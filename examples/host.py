@@ -5,9 +5,10 @@ import ldn
 import trio
 import struct
 import random
+import sys
 
 
-NICKNAME = "Hello!"
+NICKNAME = b"Hello!"
 
 
 class Stream:
@@ -59,7 +60,9 @@ async def main():
 	param.application_data = make_application_data()
 	param.name = NICKNAME
 	param.app_version = 7
-	param.password = "LunchPack2DefaultPhrase"
+	param.password = b"LunchPack2DefaultPhrase"
+	param.protocol = 1
+	param.keys = sys.argv[1]
 	async with ldn.create_network(param) as network:
 		print("Listening for events.")
 		while True:

@@ -23,8 +23,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <code>**class** [APNetwork](#apnetwork)</code><br>
 <span class="docs">Represents an active LDN network for an access point.</span>
 
-<code>**async def scan**(ifname: str = "ldn", phyname: str = "phy0", channels: list[int] = [1, 6, 11], dwell_time: float=.110) -> list[[NetworkInfo](#networkinfo)]</code><br>
-<span class="docs">Searches for nearby LDN networks on the given WLAN channels. To perform the scanning, this function creates a new interface on the given wiphy. The given interface name must not already be in use.</span>
+<code>**async def scan**(ifname: str = "ldn", phyname: str = "phy0", channels: list[int] = [1, 6, 11], dwell_time: float=.110, protocol: int = 1, keys: str = None) -> list[[NetworkInfo](#networkinfo)]</code><br>
+<span class="docs">Searches for nearby LDN networks on the given WLAN channels. To perform the scanning, this function creates a new interface on the given wiphy. The given interface name must not already be in use. The protocol should be 1 (NX) or 3. keys is the path to prod.keys, this is required.</span>
 
 <code>**async with connect**(param: [ConnectNetworkParam](#connectnetworkparam)) -> [STANetwork](#stanetwork)</code><br>
 <span class="docs">Joins an active LDN network. The station is disconnected automatically at the end of the `async with` block.</span>
@@ -104,7 +104,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">The IP address of the participant (169.254.X.Y).</span><br>
 <code>mac_address: [MACAddress](#macaddress)</code><br>
 <span class="docs">The MAC address of the participant.</span><br>
-`name: str`<br>
+`name: bytes`<br>
 <span class="docs">The nickname of the participant.</span><br>
 `app_version: int`<br>
 <span class="docs">The application communication version of the participant.</span><br>
@@ -122,10 +122,10 @@ Implements the local wireless protocol used by the Nintendo Switch.
 
 <code>network: [NetworkInfo](#networkinfo)</code><br>
 <span class="docs">The network information obtained during scanning.</span><br>
-`password: str = ""`</code><br>
-<span class="docs">Password. This is used to generate encryption keys. Authentication fails if the password is wrong.</span>
+`password: bytes = b""`</code><br>
+<span class="docs">Password/passphrase. This is used to generate encryption keys. Authentication fails if the password is wrong.</span>
 
-`name: str`<br>
+`name: bytes`<br>
 <span class="docs">Your nickname (up to 32 bytes)</span><br>
 `app_version: int`<br>
 <span class="docs">Your application communication version.</span>
@@ -136,6 +136,11 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">Specifies whether the DRM challenge is enabled. This is always enabled for games, but not for system titles.</span><br>
 `device_id: int = random.randint(0, 0xFFFFFFFFFFFFFFFF)`<br>
 <span class="docs">The device id for the DRM challenge.</span>
+
+`protocol: int = 1`<br>
+<span class="docs">The Protocol to use, see scan() above.</span><br>
+`keys: str = None`<br>
+<span class="docs">The required path to prod.keys.</span>
 
 ## CreateNetworkParam
 <code>**def \_\_init__**()</code><br>
@@ -168,7 +173,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `ssid: bytes = None`<br>
 <span class="docs">Must contain exactly 16 bytes. If `None`, a random SSID is generated during network creation.</span>
 
-`name: str`<br>
+`name: bytes`<br>
 <span class="docs">Your nickname (up to 32 bytes)</span><br>
 `app_version: int`<br>
 <span class="docs">Your application communication version.</span><br>
@@ -179,8 +184,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">The WLAN channel of the network. If `None`, the channel is chosen randomly from `1`, `6` or `11` during network creation.</span><br>
 `key: bytes = None`<br>
 <span class="docs">Network key (16 bytes). This is used to generate encryption keys. If `None`, a random key is generated during network creation.</span><br>
-`password: str = ""`<br>
-<span class="docs">Password. This is used to generate encryption keys.</span>
+`password: bytes = b""`<br>
+<span class="docs">Password/passphrase. This is used to generate encryption keys.</span>
 
 `version: int = 4`<br>
 <span class="docs">LDN version (`2`, `3` or `4`).</span><br>
@@ -188,6 +193,15 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">Specifies whether the DRM challenge is enabled. This is always enabled for games, but not for system titles.</span><br>
 `device_id: int = random.randint(0, 0xFFFFFFFFFFFFFFFF)`<br>
 <span class="docs">The device id for the DRM challenge.</span>
+
+`protocol: int = 1`<br>
+<span class="docs">The Protocol to use, see scan() above.</span><br>
+`keys: str = None`<br>
+<span class="docs">The required path to prod.keys.</span><br>
+`advert_key: bytes = None`<br>
+<span class="docs">Optional 16-bytes key to use for the advert instead of deriving it. Make sure to set the above `ssid` field to the relevant value.</span><br>
+`data_key: bytes = None`<br>
+<span class="docs">Optional 16-bytes CCMP key to use for data-frames instead of deriving it. Make sure to set the above `key` field to the relevant value.</span>
 
 ## STANetwork
 <code>**def info**() -> [NetworkInfo](#networkinfo)</code><br>

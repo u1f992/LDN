@@ -49,10 +49,6 @@ PLATFORM_NX = 0
 PLATFORM_OUNCE = 1
 
 
-AES_KEK_GENERATION_SOURCE = bytes.fromhex("4d870986c45d20722fba1053da92e8a9")
-AES_KEY_GENERATION_SOURCE = bytes.fromhex("89615ee05c31b6805fe58f3da24f7aa8")
-MASTER_KEY = bytes.fromhex("c2caaff089b9aed55694876055271c7d")
-
 CHALLENGE_KEY = bytes.fromhex("f84b487fb37251c263bf11609036589266af70ca79b44c93c7370c5769c0f602")
 
 
@@ -66,20 +62,51 @@ ChannelBands = {
 	48: 5,
 }
 
+def load_keys(filename):
+	if filename is None:
+		raise ValueError("Keys path is required")
+
+	with open(filename) as f:
+		lines = f.readlines()
+
+	keys = {}
+	for line in lines:
+		line = line.strip()
+		if line:
+			name, key = line.split("=")
+			keys[name.strip()] = bytes.fromhex(key)
+	return keys
+
+def get_master_key(keys, key_generation):
+	keygen = key_generation
+	if keygen!=0:
+		keygen = keygen-1
+	keyname = "master_key_%02x" %(keygen)
+	return keys[keyname]
 
 def decrypt_key(key, kek):
 	aes = AES.new(kek, AES.MODE_ECB)
 	return aes.decrypt(key)
 
-def derive_key(inp, source):
-	key = decrypt_key(AES_KEK_GENERATION_SOURCE, MASTER_KEY)
+def derive_key_get_masterkey(keys, protocol):
+	key_generation = None
+	if protocol == 1: # NX
+		key_generation = 0
+	elif protocol == 3:
+		key_generation = 0x13
+	else:
+		raise ValueError("Invalid protocol %u" % (protocol))
+	return get_master_key(keys, key_generation)
+
+def derive_key(keys, inp, source, protocol):
+	key = decrypt_key(keys["aes_kek_generation_source"], derive_key_get_masterkey(keys, protocol))
 	key = decrypt_key(source, key)
-	key = decrypt_key(AES_KEY_GENERATION_SOURCE, key)
+	key = decrypt_key(keys["aes_key_generation_source"], key)
 	return decrypt_key(hashlib.sha256(inp).digest()[:16], key)
 
-def generate_data_key(key, password):
+def generate_data_key(keys, key, password, protocol):
 	source = bytes.fromhex("f1e7018419a84f711da714c2cf919c9c")
-	return derive_key(key + password.encode(), source)
+	return derive_key(keys, key + password, source, protocol)
 
 
 class AuthenticationError(Exception):
@@ -119,7 +146,7 @@ class ParticipantInfo:
 		self.ip_address = "0.0.0.0"
 		self.mac_address = MACAddress()
 		self.connected = False
-		self.name = ""
+		self.name = b""
 		self.app_version = 0
 		self.platform = PLATFORM_NX
 
@@ -157,7 +184,7 @@ class AdvertisementInfoEncoderV1:
 		stream.u8(info.num_participants)
 
 		for participant in info.participants:
-			name = participant.name.encode()
+			name = participant.name
 			stream.write(socket.inet_aton(participant.ip_address))
 			stream.write(participant.mac_address.encode())
 			stream.bool(participant.connected)
@@ -196,7 +223,7 @@ class AdvertisementInfoEncoderV1:
 			participant.mac_address = MACAddress(stream.read(6))
 			participant.connected = stream.bool()
 			participant.platform = stream.u8()
-			participant.name = stream.read(32).rstrip(b"\0").decode()
+			participant.name = stream.read(32).rstrip(b"\0")
 			participant.app_version = stream.u16()
 			stream.pad(10)
 			info.participants.append(participant)
@@ -226,11 +253,11 @@ class AdvertisementInfoEncoderV2:
 		stream.pad(8)
 		stream.u16((info.band << 10) | info.channel)
 		stream.u8(info.max_participants)
-		stream.u8(info.num_participatns)
+		stream.u8(info.num_participants)
 
 		for index, participant in enumerate(info.participants):
 			if participant.connected:
-				name = participant.name.encode()
+				name = participant.name
 				stream.write(socket.inet_aton(participant.ip_address))
 				stream.write(participant.mac_address.encode())
 				stream.u8(index)
@@ -267,12 +294,14 @@ class AdvertisementInfoEncoderV2:
 			participant.mac_address = MACAddress(stream.read(6))
 			index = stream.u8()
 			participant.platform = stream.u8()
-			participant.name = stream.read(32).rstrip(b"\0").decode()
+			participant.name = stream.read(32).rstrip(b"\0")
+			stream.pad(4)
 
 			participant.connected = True
 			participant.app_version = info.app_version
 
-			info.participants[index] = participant
+			if index < len(info.participants):
+				info.participants[index] = participant
 		
 		info.application_data = stream.read(stream.u16())
 		return info
@@ -285,20 +314,27 @@ class AdvertisementFrame:
 		self.encryption = None
 		self.nonce = None
 		self.info = None
-	
+		self.protocol = None
+		self.key = None
+		self.keys = None
+
 	def derive_key(self):
-		source = bytes.fromhex("191884743e24c77d87c69e4207d0c438")
-		return derive_key(self.header.encode(">"), source)
+		key = self.key
+		if key is None:
+			source = bytes.fromhex("191884743e24c77d87c69e4207d0c438")
+			key = derive_key(self.keys, self.header.encode(">"), source, self.protocol)
+		return key
 	
 	def encrypt_ctr(self, data):
 		key = self.derive_key()
 		aes = AES.new(key, AES.MODE_CTR, nonce=self.nonce)
 		return aes.encrypt(data)
 	
-	def encrypt_gcm(self, data):
+	def encrypt_gcm(self, header, data):
 		key = self.derive_key()
 		nonce = self.nonce + bytes(8)
 		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
+		aes.update(header)
 		data, mac = aes.encrypt_and_digest(data)
 		return mac + data
 	
@@ -307,10 +343,11 @@ class AdvertisementFrame:
 		aes = AES.new(key, AES.MODE_CTR, nonce=self.nonce)
 		return aes.decrypt(data)
 	
-	def decrypt_gcm(self, data):
+	def decrypt_gcm(self, header, data):
 		key = self.derive_key()
 		nonce = self.nonce + bytes(8)
 		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
+		aes.update(header)
 		return aes.decrypt_and_verify(data[16:], data[:16])
 	
 	def make_advertisement_encoder(self, encryption):
@@ -326,17 +363,18 @@ class AdvertisementFrame:
 		stream.pad(1)
 		stream.u16(0x101) # Advertisement frame
 		stream.pad(4)
-		
+
+		encoder = self.make_advertisement_encoder(self.encryption)
+		plaintext = encoder.encode(self.info)
+		plaintext_len = len(plaintext)
+
 		substream = streams.StreamOut(">")
 		substream.write(self.header.encode(">"))
 		substream.u8(self.version)
 		substream.u8(self.encryption)
-		substream.u16(0x500)
+		substream.u16(plaintext_len)
 		substream.write(self.nonce)
 		header = substream.get()
-
-		encoder = self.make_advertisement_encoder(self.encryption)
-		plaintext = encoder.encode(self.info)
 		
 		if self.encryption != ENCRYPTION_AES_GCM:
 			message = header + bytes(32) + plaintext
@@ -345,10 +383,10 @@ class AdvertisementFrame:
 		
 		if self.encryption == ENCRYPTION_PLAIN:
 			ciphertext = plaintext
-		if self.encryption == ENCRYPTION_AES_CTR:
+		elif self.encryption == ENCRYPTION_AES_CTR:
 			ciphertext = self.encrypt_ctr(plaintext)
 		elif self.encryption == ENCRYPTION_AES_GCM:
-			ciphertext = self.encrypt_gcm(plaintext)
+			ciphertext = self.encrypt_gcm(header, plaintext)
 		else:
 			raise ValueError("An invalid encryption mode was specified")
 		
@@ -383,17 +421,21 @@ class AdvertisementFrame:
 		self.encryption = stream.u8()
 		
 		size = stream.u16()
-		if size != 0x500:
+		if self.encryption < ENCRYPTION_AES_GCM and size != 0x500:
 			raise ValueError("Advertisement frame has unexpected size field")
 		
 		self.nonce = stream.read(4)
+
+		if self.encryption != ENCRYPTION_PLAIN:
+			if (self.protocol==1 and self.encryption != ENCRYPTION_AES_CTR) or (self.protocol!=1 and self.encryption != ENCRYPTION_AES_GCM):
+				raise ValueError("Advertisement frame has invalid encryption algorithm for the current protocol")
 
 		if self.encryption == ENCRYPTION_PLAIN:
 			plaintext = stream.read(32 + size)
 		elif self.encryption == ENCRYPTION_AES_CTR:
 			plaintext = self.decrypt_ctr(stream.read(32 + size))
 		elif self.encryption == ENCRYPTION_AES_GCM:
-			plaintext = self.decrypt_gcm(stream.read(16 + size))
+			plaintext = self.decrypt_gcm(header, stream.read(16 + size))
 		else:
 			raise ValueError("Advertisement frame has invalid encryption algorithm")
 		
@@ -416,7 +458,7 @@ class ChallengeRequest:
 		self.token = None
 		self.nonce = None
 		self.device_id = None
-		self.unk = b"a" * 16
+		self.unk = bytes(16) # Only set on S2.
 		self.params1 = []
 		self.params2 = []
 	
@@ -552,7 +594,7 @@ class AuthenticationRequest:
 	def encode(self, version):
 		stream = streams.StreamOut(">")
 		
-		name = self.username.encode()
+		name = self.username
 		stream.write(name + b"\0" * (32 - len(name)))
 		stream.u16(self.app_version)
 		stream.u8(self.platform)
@@ -567,7 +609,7 @@ class AuthenticationRequest:
 	def decode(self, data, version):
 		stream = streams.StreamIn(data, ">")
 		
-		self.username = stream.read(32).rstrip(b"\0").decode()
+		self.username = stream.read(32).rstrip(b"\0")
 		self.app_version = stream.u16()
 		self.platform = stream.u8()
 		stream.pad(29)
@@ -609,7 +651,31 @@ class AuthenticationFrame:
 		self.network_key = None
 		self.authentication_key = None
 		self.payload = None
-	
+		self.encryption = None
+		self.protocol = None
+		self.keys = None
+
+	def encrypt(self, header, nonce, data):
+		if self.encryption == 0:
+			return (data, None)
+
+		key = generate_data_key(self.keys, header[0x38:0x38+0x10], bytes(), self.protocol)
+
+		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
+		aes.update(header)
+		ciphertext, tag = aes.encrypt_and_digest(data)
+		return (ciphertext, tag)
+
+	def decrypt(self, header, nonce, data, tag):
+		if self.encryption == 0:
+			return data
+
+		key = generate_data_key(self.keys, header[0x38:0x38+0x10], bytes(), self.protocol)
+
+		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
+		aes.update(header)
+		return aes.decrypt_and_verify(data, tag)
+
 	def encode(self):
 		payload = self.payload.encode(self.version)
 		
@@ -617,17 +683,33 @@ class AuthenticationFrame:
 		stream.u24(0x0022AA) # Nintendo
 		stream.u16(0x102) # Authentication frame
 		stream.pad(1)
+
+		if self.protocol == 1:
+			self.encryption = 0
+		else:
+			self.encryption = 1
+
+		substream = streams.StreamOut(">")
+		substream.u8(self.version)
+		substream.u8(len(payload) & 0xFF)
+		substream.u8(self.status_code)
+		substream.u8(isinstance(self.payload, AuthenticationResponse))
+		substream.u8(len(payload) >> 8)
+		substream.u8(self.encryption)
+		substream.pad(2)
 		
-		stream.u8(self.version)
-		stream.u8(len(payload) & 0xFF)
-		stream.u8(self.status_code)
-		stream.u8(isinstance(self.payload, AuthenticationResponse))
-		stream.u8(len(payload) >> 8)
-		stream.pad(3)
-		
-		stream.write(self.header.encode("<"))
-		stream.write(self.network_key)
-		stream.write(self.authentication_key)
+		substream.write(self.header.encode("<"))
+		substream.write(self.network_key)
+		substream.write(self.authentication_key)
+
+		header = substream.get()
+		stream.write(header)
+		nonce = header[:0xC]
+
+		if self.encryption==1:
+			payload, tag = self.encrypt(header, nonce, payload)
+			stream.write(tag)
+
 		stream.write(payload)
 		return stream.get()
 	
@@ -638,19 +720,30 @@ class AuthenticationFrame:
 		if stream.u16() != 0x102:
 			raise ValueError("Data frame is not an authentication frame")
 		stream.pad(1)
-		
+
+		header = stream.peek(0x48)
+		nonce = header[:0xC]
+
 		self.version = stream.u8()
 		size_lo = stream.u8()
 		self.status_code = stream.u8()
 		is_response = stream.u8()
 		size_hi = stream.u8()
-		stream.pad(3)
+		self.encryption = stream.u8()
+		stream.pad(2)
 		
 		self.header = SessionInfo()
 		self.header.decode(stream.read(32), "<")
 		self.network_key = stream.read(16)
 		self.authentication_key = stream.read(16)
-		
+
+		if (self.protocol==1 and self.encryption!=0) or (self.protocol!=1 and self.encryption!=1):
+			raise ValueError("Authentication frame has wrong encryption for the current protocol")
+
+		tag = None
+		if self.encryption==1:
+			tag = stream.read(16)
+
 		size = (size_hi << 8) | size_lo
 		if stream.available() != size:
 			raise ValueError("Authentication frame has wrong size")
@@ -659,7 +752,10 @@ class AuthenticationFrame:
 			self.payload = AuthenticationResponse()
 		else:
 			self.payload = AuthenticationRequest()
-		self.payload.decode(stream.read(size), self.version)
+
+		data = stream.read(size)
+		data = self.decrypt(header, nonce, data, tag)
+		self.payload.decode(data, self.version)
 
 
 class DisconnectFrame:
@@ -709,7 +805,10 @@ class NetworkInfo:
 		self.challenge = None
 		self.nonce = None
 		self.app_version = None
-	
+		self.protocol = None
+		self.advert_key = None
+		self.keys = None
+
 	def check(self, info):
 		if self.address != info.address: return False
 		if self.channel != info.channel: return False
@@ -762,8 +861,13 @@ class NetworkInfo:
 		frame.header = header
 		frame.version = self.version
 		frame.encryption = ENCRYPTION_PLAIN if self.security_level == 3 else ENCRYPTION_AES_CTR
+		if self.protocol != 1 and self.security_level != 3:
+			frame.encryption = ENCRYPTION_AES_GCM
 		frame.nonce = self.nonce
 		frame.info = info
+		frame.protocol = self.protocol
+		frame.key = self.advert_key
+		frame.keys = self.keys
 		return frame
 
 
@@ -773,19 +877,24 @@ class ConnectNetworkParam:
 		self.phyname = "phy0"
 		
 		self.network = None
-		self.password = ""
+		self.password = b""
 		
-		self.name = ""
+		self.name = b""
 		self.app_version = 0
 		self.platform = PLATFORM_NX
 		
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
+		self.protocol = 1
+		self.keys = None
+
 	def check(self):
 		if self.network is None: raise ValueError("network is required")
 		if self.network.version not in [2, 3, 4]:
 			raise ValueError("Network version not supported")
+
+		self.keys = load_keys(self.keys)
 
 
 class CreateNetworkParam:
@@ -805,17 +914,22 @@ class CreateNetworkParam:
 		self.security_level = 1
 		self.ssid = None
 		
-		self.name = ""
+		self.name = b""
 		self.app_version = 0
 		self.platform = PLATFORM_NX
 		
 		self.channel = None
 		self.key = None
-		self.password = ""
+		self.password = b""
 		
 		self.version = 4
 		self.enable_challenge = True
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
+
+		self.protocol = 1
+		self.keys = None
+		self.advert_key = None
+		self.data_key = None
 
 	def check(self):
 		if self.local_communication_id is None: raise ValueError("local_communication_id is required")
@@ -830,6 +944,8 @@ class CreateNetworkParam:
 			raise ValueError("key has wrong size")
 		if self.version not in [2, 3, 4]:
 			raise ValueError("version is invalid")
+
+		self.keys = load_keys(self.keys)
 
 
 class DisconnectEvent:
@@ -858,8 +974,10 @@ class ApplicationDataChanged:
 
 
 class AdvertisementMonitor:
-	def __init__(self, monitor):
+	def __init__(self, monitor, protocol, keys):
 		self.monitor = monitor
+		self.protocol = protocol
+		self.keys = keys
 	
 	async def receive(self):
 		# Vendor-specific, Nintendo OUI, LDN, Advertisement
@@ -883,6 +1001,8 @@ class AdvertisementMonitor:
 			
 			# Decode the frame itself
 			frame = AdvertisementFrame()
+			frame.protocol = self.protocol
+			frame.keys = self.keys
 			try: frame.decode(action.action)
 			except Exception as e:
 				continue # Skip invalid frames
@@ -891,6 +1011,7 @@ class AdvertisementMonitor:
 			info.address = action.source
 			info.channel = wlan.map_frequency(radiotap.frequency)
 			info.band = ChannelBands[info.channel]
+			info.protocol = self.protocol
 			info.parse(frame)
 			return info
 
@@ -931,6 +1052,8 @@ class STANetwork:
 		if address != self.network.address: return False
 		
 		frame = AuthenticationFrame()
+		frame.protocol = self.param.protocol
+		frame.keys = self.param.keys
 		try:
 			frame.decode(data)
 		except Exception:
@@ -975,6 +1098,8 @@ class STANetwork:
 					continue # Only process frames from the host
 				
 				frame = AdvertisementFrame()
+				frame.protocol = self.param.protocol
+				frame.keys = self.param.keys
 				try: frame.decode(event.frame.action)
 				except Exception:
 					continue # Skip invalid frames
@@ -983,6 +1108,7 @@ class STANetwork:
 				info.address = event.frame.source
 				info.channel = wlan.map_frequency(event.frequency)
 				info.band = ChannelBands[info.channel]
+				info.protocol = self.param.protocol
 				info.parse(frame)
 				if not self.network.check(info):
 					raise ConnectionError("Received incompatible advertisement frame from host")
@@ -1014,6 +1140,8 @@ class STANetwork:
 		header.ssid = self.network.ssid
 		
 		frame = AuthenticationFrame()
+		frame.protocol = self.param.protocol
+		frame.keys = self.param.keys
 		frame.version = self.network.version
 		frame.status_code = 0
 		frame.header = header
@@ -1163,9 +1291,14 @@ class APNetwork:
 		self.network.participants = participants
 		self.network.application_data = param.application_data
 		self.network.app_version = param.app_version
-		self.network.challenge = random.randint(0, 0xFFFFFFFFFFFFFFFF)
+		self.network.challenge = 0
+		if param.enable_challenge:
+			self.network.challenge = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 		self.network.nonce = struct.pack(">I", self.nonce)
-		
+		self.network.protocol = param.protocol
+		self.network.keys = param.keys
+		self.network.advert_key = param.advert_key
+
 		self.events = queue.create()
 	
 	def make_authentication_response(self, status, version, key, challenge=b""):
@@ -1179,6 +1312,8 @@ class APNetwork:
 		response.challenge = challenge
 		
 		frame = AuthenticationFrame()
+		frame.protocol = self.network.protocol
+		frame.keys = self.network.keys
 		frame.version = version
 		frame.status_code = status
 		frame.header = header
@@ -1283,7 +1418,9 @@ class APNetwork:
 	
 	async def process_authentication_event(self, event):
 		frame = AuthenticationFrame()
-		
+		frame.protocol = self.network.protocol
+		frame.keys = self.network.keys
+
 		try:
 			frame.decode(event.data)
 		except Exception:
@@ -1395,17 +1532,19 @@ class APNetwork:
 				await self.interface.send_data_frame(participant.mac_address, frame.encode())
 
 
-async def scan(ifname="ldn", phyname="phy0", channels=[1, 6, 11], dwell_time=.110):
+async def scan(ifname="ldn", phyname="phy0", channels=[1, 6, 11], dwell_time=.110, protocol=1, keys=None):
 	if not channels: return []
 
 	# Check if all channels are valid
 	for channel in channels:
 		if not wlan.is_valid_channel(channel):
 			raise ValueError("Invalid channel: %i" %channel)
-	
+
+	keys = load_keys(keys)
+
 	async with wlan.create() as factory:
 		async with factory.create_monitor(phyname, ifname) as monitor:
-			scanner = AdvertisementMonitor(monitor)
+			scanner = AdvertisementMonitor(monitor, protocol, keys)
 			return await scanner.scan(channels, dwell_time)
 
 @contextlib.asynccontextmanager
@@ -1417,7 +1556,7 @@ async def connect(param):
 	
 	key = None
 	if network.security_level == 1:
-		key = generate_data_key(network.key, param.password)
+		key = generate_data_key(param.keys, network.key, param.password, param.protocol)
 	
 	async with wlan.create() as factory:
 		async with factory.connect_network(param.phyname, param.ifname, network.ssid.hex(), network.channel, key) as interface:
@@ -1436,7 +1575,9 @@ async def create_network(param):
 	
 	key = None
 	if param.security_level == 1:
-		key = generate_data_key(param.key, param.password)
+		key = param.data_key
+		if key is None:
+			key = generate_data_key(param.keys, param.key, param.password, param.protocol)
 	
 	async with wlan.create() as factory:
 		async with factory.create_monitor(param.phyname_monitor, param.ifname_monitor) as monitor:

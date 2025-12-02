@@ -1219,6 +1219,7 @@ class AdvertisementMonitor:
 			frame = AdvertisementFrame(self._key_derivation, self._protocol)
 			try: frame.decode(action.action)
 			except Exception:
+				logger.exception("Failed to parse advertisement frame")
 				continue # Skip invalid frames
 			
 			info = NetworkInfo(self._protocol)

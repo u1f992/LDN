@@ -1698,7 +1698,7 @@ class APNetwork:
 			return self._make_authentication_response(AUTH_MALFORMED_REQUEST, self._network.version, bytes(16))
 		
 		error = self._check_authentication_request(event.address, frame)
-		if error is not None:
+		if error != AUTH_SUCCESS:
 			return self._make_authentication_response(error, self._network.version, frame.client_random)
 		
 		challenge = self._process_authentication_challenge(frame.payload.challenge)

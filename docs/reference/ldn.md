@@ -23,8 +23,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <code>**class** [APNetwork](#apnetwork)</code><br>
 <span class="docs">Represents an active LDN network for an access point.</span>
 
-<code>**async def scan**(ifname: str = "ldn", phyname: str = "phy0", channels: list[int] = [1, 6, 11], dwell_time: float=.110, protocol: int = 1, keys: str = None) -> list[[NetworkInfo](#networkinfo)]</code><br>
-<span class="docs">Searches for nearby LDN networks on the given WLAN channels. To perform the scanning, this function creates a new interface on the given wiphy. The given interface name must not already be in use. The protocol should be 1 (NX) or 3. keys is the path to prod.keys, this is required.</span>
+<code>**async def scan**(ifname: str = "ldn", phyname: str = "phy0", channels: list[int] = [1, 6, 11], dwell_time: float=.110, protocol: int = 1, keys_path: str = "~/.switch/prod.keys") -> list[[NetworkInfo](#networkinfo)]</code><br>
+<span class="docs">Searches for nearby LDN networks on the given WLAN channels. To perform the scanning, this function creates a new interface on the given wiphy. The given interface name must not already be in use. The protocol should be 1 (NX) or 3.</span>
 
 <code>**async with connect**(param: [ConnectNetworkParam](#connectnetworkparam)) -> [STANetwork](#stanetwork)</code><br>
 <span class="docs">Joins an active LDN network. The station is disconnected automatically at the end of the `async with` block.</span>
@@ -139,7 +139,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 
 `protocol: int = 1`<br>
 <span class="docs">The Protocol to use, see scan() above.</span><br>
-`keys: str = None`<br>
+`keys_path: str = "~/.switch/prod.keys"`<br>
 <span class="docs">The required path to prod.keys.</span>
 
 ## CreateNetworkParam
@@ -196,7 +196,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 
 `protocol: int = 1`<br>
 <span class="docs">The Protocol to use, see scan() above.</span><br>
-`keys: str = None`<br>
+`keys_path: str = "~/.switch/prod.keys"`<br>
 <span class="docs">The required path to prod.keys.</span><br>
 `advert_key: bytes = None`<br>
 <span class="docs">Optional 16-bytes key to use for the advert instead of deriving it. Make sure to set the above `ssid` field to the relevant value.</span><br>

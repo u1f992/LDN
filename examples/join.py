@@ -4,7 +4,6 @@
 import ldn
 import trio
 import socket
-import sys
 
 
 LOCAL_COMMUNICATION_ID = 0x01009B90006DC000
@@ -15,14 +14,13 @@ APPLICATION_VERSION = 6
 
 NICKNAME = b"Hello!"
 
-PROTOCOL = 1
 
-async def scan(keys):
+async def scan():
 	# This function tries to find a nearby network
 	print("Scanning for networks.")
 	print()
 	
-	networks = await ldn.scan(protocol=PROTOCOL, keys=keys)
+	networks = await ldn.scan()
 	print("Found %i network(s)." %len(networks))
 	
 	# Check if one the networks is suitable
@@ -56,8 +54,7 @@ async def receive_packets():
 
 async def main():
 	# First try to find a suitable network
-	keys = sys.argv[1]
-	info = await scan(keys)
+	info = await scan()
 	if info is None:
 		return
 	
@@ -77,8 +74,6 @@ async def main():
 	param.password = PASSWORD
 	param.name = NICKNAME
 	param.app_version = APPLICATION_VERSION
-	param.protocol = PROTOCOL
-	param.keys = keys
 	async with ldn.connect(param) as network:
 		# If this part is reached, we have successfully joined the network
 		print("Connection ok.")

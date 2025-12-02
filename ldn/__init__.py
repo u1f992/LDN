@@ -1,15 +1,18 @@
 
 from Crypto.Cipher import AES
+
 from ldn import streams, wlan, queue, util
 from netlink import route
+
 import contextlib
-import secrets
-import hashlib
-import socket
-import random
-import struct
-import hmac
 import copy
+import hashlib
+import hmac
+import os
+import random
+import secrets
+import socket
+import struct
 import trio
 
 import logging
@@ -62,11 +65,10 @@ ChannelBands = {
 	48: 5,
 }
 
-def load_keys(filename):
-	if filename is None:
-		raise ValueError("Keys path is required")
+def load_keys(path):
+	path = os.path.expanduser(path)
 
-	with open(filename) as f:
+	with open(path) as f:
 		lines = f.readlines()
 
 	keys = {}
@@ -77,29 +79,19 @@ def load_keys(filename):
 			keys[name.strip()] = bytes.fromhex(key)
 	return keys
 
-def get_master_key(keys, key_generation):
-	keygen = key_generation
-	if keygen!=0:
-		keygen = keygen-1
-	keyname = "master_key_%02x" %(keygen)
-	return keys[keyname]
-
 def decrypt_key(key, kek):
 	aes = AES.new(kek, AES.MODE_ECB)
 	return aes.decrypt(key)
 
-def derive_key_get_masterkey(keys, protocol):
-	key_generation = None
-	if protocol == 1: # NX
-		key_generation = 0
-	elif protocol == 3:
-		key_generation = 0x13
-	else:
-		raise ValueError("Invalid protocol %u" % (protocol))
-	return get_master_key(keys, key_generation)
-
 def derive_key(keys, inp, source, protocol):
-	key = decrypt_key(keys["aes_kek_generation_source"], derive_key_get_masterkey(keys, protocol))
+	if protocol == 1: # NX
+		key = keys["master_key_00"]
+	elif protocol == 3:
+		key = keys["master_key_13"]
+	else:
+		raise ValueError("Key derivation for protocol %i is not supported" %protocol)
+	
+	key = decrypt_key(keys["aes_kek_generation_source"], key)
 	key = decrypt_key(source, key)
 	key = decrypt_key(keys["aes_key_generation_source"], key)
 	return decrypt_key(hashlib.sha256(inp).digest()[:16], key)
@@ -315,11 +307,11 @@ class AdvertisementFrame:
 		self.nonce = None
 		self.info = None
 		self.protocol = None
-		self.key = None
+		self.advert_key = None
 		self.keys = None
 
 	def derive_key(self):
-		key = self.key
+		key = self.advert_key
 		if key is None:
 			source = bytes.fromhex("191884743e24c77d87c69e4207d0c438")
 			key = derive_key(self.keys, self.header.encode(">"), source, self.protocol)
@@ -421,13 +413,14 @@ class AdvertisementFrame:
 		self.encryption = stream.u8()
 		
 		size = stream.u16()
-		if self.encryption < ENCRYPTION_AES_GCM and size != 0x500:
+		if self.encryption != ENCRYPTION_AES_GCM and size != 0x500:
 			raise ValueError("Advertisement frame has unexpected size field")
 		
 		self.nonce = stream.read(4)
 
 		if self.encryption != ENCRYPTION_PLAIN:
-			if (self.protocol==1 and self.encryption != ENCRYPTION_AES_CTR) or (self.protocol!=1 and self.encryption != ENCRYPTION_AES_GCM):
+			expected_algorithm = ENCRYPTION_AES_CTR if self.protocol == 1 else ENCRYPTION_AES_GCM
+			if self.encryption != expected_algorithm:
 				raise ValueError("Advertisement frame has invalid encryption algorithm for the current protocol")
 
 		if self.encryption == ENCRYPTION_PLAIN:
@@ -659,7 +652,7 @@ class AuthenticationFrame:
 		if self.encryption == 0:
 			return (data, None)
 
-		key = generate_data_key(self.keys, header[0x38:0x38+0x10], bytes(), self.protocol)
+		key = generate_data_key(self.keys, header[0x38:0x38+0x10], b"", self.protocol)
 
 		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
 		aes.update(header)
@@ -670,7 +663,7 @@ class AuthenticationFrame:
 		if self.encryption == 0:
 			return data
 
-		key = generate_data_key(self.keys, header[0x38:0x38+0x10], bytes(), self.protocol)
+		key = generate_data_key(self.keys, header[0x38:0x38+0x10], b"", self.protocol)
 
 		aes = AES.new(key, AES.MODE_GCM, nonce=nonce)
 		aes.update(header)
@@ -706,7 +699,7 @@ class AuthenticationFrame:
 		stream.write(header)
 		nonce = header[:0xC]
 
-		if self.encryption==1:
+		if self.encryption == 1:
 			payload, tag = self.encrypt(header, nonce, payload)
 			stream.write(tag)
 
@@ -737,11 +730,11 @@ class AuthenticationFrame:
 		self.network_key = stream.read(16)
 		self.authentication_key = stream.read(16)
 
-		if (self.protocol==1 and self.encryption!=0) or (self.protocol!=1 and self.encryption!=1):
+		if (self.protocol == 1 and self.encryption != 0) or (self.protocol != 1 and self.encryption != 1):
 			raise ValueError("Authentication frame has wrong encryption for the current protocol")
 
 		tag = None
-		if self.encryption==1:
+		if self.encryption == 1:
 			tag = stream.read(16)
 
 		size = (size_hi << 8) | size_lo
@@ -783,7 +776,7 @@ class DisconnectFrame:
 		self.reason = stream.u8()
 		stream.pad(31)
 
-		
+
 class NetworkInfo:
 	def __init__(self):
 		self.address = None
@@ -866,7 +859,7 @@ class NetworkInfo:
 		frame.nonce = self.nonce
 		frame.info = info
 		frame.protocol = self.protocol
-		frame.key = self.advert_key
+		frame.advert_key = self.advert_key
 		frame.keys = self.keys
 		return frame
 
@@ -887,14 +880,12 @@ class ConnectNetworkParam:
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
 		self.protocol = 1
-		self.keys = None
+		self.keys_path = "~/.switch/prod.keys"
 
 	def check(self):
 		if self.network is None: raise ValueError("network is required")
 		if self.network.version not in [2, 3, 4]:
 			raise ValueError("Network version not supported")
-
-		self.keys = load_keys(self.keys)
 
 
 class CreateNetworkParam:
@@ -927,7 +918,7 @@ class CreateNetworkParam:
 		self.device_id = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 
 		self.protocol = 1
-		self.keys = None
+		self.keys_path = "~/.switch/prod.keys"
 		self.advert_key = None
 		self.data_key = None
 
@@ -944,8 +935,6 @@ class CreateNetworkParam:
 			raise ValueError("key has wrong size")
 		if self.version not in [2, 3, 4]:
 			raise ValueError("version is invalid")
-
-		self.keys = load_keys(self.keys)
 
 
 class DisconnectEvent:
@@ -1039,6 +1028,7 @@ class STANetwork:
 		
 		self.network = param.network
 		self.param = param
+		self.keys = load_keys(param.keys_path)
 		
 		self.authentication_key = secrets.token_bytes(16)
 		
@@ -1053,7 +1043,7 @@ class STANetwork:
 		
 		frame = AuthenticationFrame()
 		frame.protocol = self.param.protocol
-		frame.keys = self.param.keys
+		frame.keys = self.keys
 		try:
 			frame.decode(data)
 		except Exception:
@@ -1141,7 +1131,7 @@ class STANetwork:
 		
 		frame = AuthenticationFrame()
 		frame.protocol = self.param.protocol
-		frame.keys = self.param.keys
+		frame.keys = self.keys
 		frame.version = self.network.version
 		frame.status_code = 0
 		frame.header = header
@@ -1296,7 +1286,7 @@ class APNetwork:
 			self.network.challenge = random.randint(0, 0xFFFFFFFFFFFFFFFF)
 		self.network.nonce = struct.pack(">I", self.nonce)
 		self.network.protocol = param.protocol
-		self.network.keys = param.keys
+		self.network.keys = load_keys(param.keys_path)
 		self.network.advert_key = param.advert_key
 
 		self.events = queue.create()
@@ -1532,7 +1522,7 @@ class APNetwork:
 				await self.interface.send_data_frame(participant.mac_address, frame.encode())
 
 
-async def scan(ifname="ldn", phyname="phy0", channels=[1, 6, 11], dwell_time=.110, protocol=1, keys=None):
+async def scan(ifname="ldn", phyname="phy0", channels=[1, 6, 11], dwell_time=.110, protocol=1, keys="~/.switch/prod.keys"):
 	if not channels: return []
 
 	# Check if all channels are valid
@@ -1553,10 +1543,12 @@ async def connect(param):
 	param.check()
 	
 	network = param.network
+
+	keys = load_keys(param.keys_path)
 	
 	key = None
 	if network.security_level == 1:
-		key = generate_data_key(param.keys, network.key, param.password, param.protocol)
+		key = generate_data_key(keys, network.key, param.password, param.protocol)
 	
 	async with wlan.create() as factory:
 		async with factory.connect_network(param.phyname, param.ifname, network.ssid.hex(), network.channel, key) as interface:
@@ -1572,12 +1564,14 @@ async def create_network(param):
 	if param.channel is None: param.channel = random.choice([1, 6, 11])
 	if param.key is None: param.key = secrets.token_bytes(16)
 	param.check()
+
+	keys = load_keys(param.keys_path)
 	
 	key = None
 	if param.security_level == 1:
 		key = param.data_key
 		if key is None:
-			key = generate_data_key(param.keys, param.key, param.password, param.protocol)
+			key = generate_data_key(keys, param.key, param.password, param.protocol)
 	
 	async with wlan.create() as factory:
 		async with factory.create_monitor(param.phyname_monitor, param.ifname_monitor) as monitor:

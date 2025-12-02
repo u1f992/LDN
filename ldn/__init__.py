@@ -128,7 +128,7 @@ class KeyDerivation:
 		if self._protocol == 1:
 			return self._keys["master_key_00"]
 		elif self._protocol == 3:
-			return self._keys["master_key_13"]
+			return self._keys["master_key_12"]
 		raise ValueError(f"Key derivation for protocol version {self._protocol} is not supported")
 	
 	def _derive_key(self, data: bytes, source: bytes) -> bytes:

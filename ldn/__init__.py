@@ -110,9 +110,15 @@ class KeyDerivation:
 	_keys: dict[str, bytes]
 	_protocol: int
 
-	def __init__(self, keys: dict[str, bytes], protocol: int):
+	_override_advertise_key: bytes
+	_override_data_key: bytes
+
+	def __init__(self, keys: dict[str, bytes], protocol: int, *, override_advertise_key: bytes = None, override_data_key: bytes = None):
 		self._keys = keys
 		self._protocol = protocol
+
+		self._override_advertise_key = override_advertise_key
+		self._override_data_key = override_data_key
 	
 	def _decrypt_key(self, key: bytes, kek: bytes) -> bytes:
 		aes = AES.new(kek, AES.MODE_ECB)
@@ -134,6 +140,10 @@ class KeyDerivation:
 		key = self._decrypt_key(source, key)
 		key = self._decrypt_key(aes_key_generation_source, key)
 		return self._decrypt_key(hashlib.sha256(data).digest()[:16], key)
+	
+	def derive_authentication_key(self, client_random: bytes) -> bytes:
+		source = bytes.fromhex("f1e7018419a84f711da714c2cf919c9c")
+		return self._derive_key(client_random, source)
 	
 	def derive_data_key(self, server_random: bytes, password: bytes) -> bytes:
 		source = bytes.fromhex("f1e7018419a84f711da714c2cf919c9c")
@@ -775,7 +785,7 @@ class AuthenticationFrame:
 		self.payload = None
 
 	def _encrypt_aes_gcm(self, header: bytes, payload: bytes) -> bytes:
-		key = self._key_derivation.derive_data_key(self.client_random, b"")
+		key = self._key_derivation.derive_authentication_key(self.client_random)
 
 		aes = AES.new(key, AES.MODE_GCM, nonce=header[:12])
 		aes.update(header)
@@ -783,7 +793,7 @@ class AuthenticationFrame:
 		return aes.encrypt_and_digest(payload)
 
 	def _decrypt_aes_gcm(self, header: bytes, payload: bytes, tag: bytes) -> bytes:
-		key = self._key_derivation.derive_data_key(self.client_random, b"")
+		key = self._key_derivation.derive_authentication_key(self.client_random)
 
 		aes = AES.new(key, AES.MODE_GCM, nonce=header[:12])
 		aes.update(header)
@@ -1042,6 +1052,9 @@ class ConnectNetworkParam:
 
 	keys: dict[str, bytes]
 
+	override_data_key: bytes
+	override_advertise_key: bytes
+
 	def __init__(self):
 		self.ifname = "ldn"
 		self.phyname = "phy0"
@@ -1059,6 +1072,9 @@ class ConnectNetworkParam:
 		self.client_random = None
 
 		self.keys = None
+
+		self.override_advertise_key = None
+		self.override_data_key = None
 
 	def check(self) -> None:
 		if self.network is None: raise ValueError("network is required")
@@ -1101,6 +1117,9 @@ class CreateNetworkParam:
 	
 	keys: dict[str, bytes]
 
+	override_data_key: bytes
+	override_advertise_key: bytes
+
 	def __init__(self):
 		self.ifname = "ldn"
 		self.ifname_monitor = "ldn-mon"
@@ -1132,6 +1151,9 @@ class CreateNetworkParam:
 		self.protocol = 1
 
 		self.keys = None
+
+		self.override_advertise_key = None
+		self.override_data_key = None
 
 	def check(self):
 		if self.local_communication_id is None: raise ValueError("local_communication_id is required")
@@ -1810,7 +1832,11 @@ async def connect(param: ConnectNetworkParam) -> STANetwork:
 	
 	network = param.network
 
-	key_derivation = KeyDerivation(param.keys, network.protocol)
+	key_derivation = KeyDerivation(
+		param.keys, network.protocol,
+		override_advertise_key=param.override_advertise_key,
+		override_data_key=param.override_data_key
+	)
 	
 	wlan_key = None
 	if network.security_mode == SECURITY_MODE_PROD:
@@ -1832,7 +1858,11 @@ async def create_network(param: CreateNetworkParam) -> APNetwork:
 	if param.server_random is None: param.server_random = secrets.token_bytes(16)
 	param.check()
 
-	key_derivation = KeyDerivation(param.keys, param.protocol)
+	key_derivation = KeyDerivation(
+		param.keys, param.protocol,
+		override_advertise_key=param.override_advertise_key,
+		override_data_key=param.override_data_key
+	)
 	
 	wlan_key = None
 	if param.security_mode == SECURITY_MODE_PROD:

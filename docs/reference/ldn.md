@@ -146,6 +146,11 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `keys: dict[str, bytes]`<br>
 <span class="docs">The keys that are loaded from `prod.keys`. These can be loaded from a file with the `load_keys` function.</span>
 
+`override_advertise_key: bytes = None`<br>
+<span class="docs">Overrides the key that is used to decrypt the advertisement frames. This is normally not required, but can be useful while researching new protocol versions.</span><br>
+`override_data_key: bytes = None`<br>
+<span class="docs">Overrides the key that is used to encrypt data frames. This is normally not required, but can be useful while researching new protocol versions.</span>
+
 ## CreateNetworkParam
 <code>**def \_\_init__**()</code><br>
 <span class="docs">Creates a new instance with the default values. The `local_communication_id`, `scene_id`, `name`, `app_version` and `keys` fields are always required.</span>
@@ -203,6 +208,11 @@ Implements the local wireless protocol used by the Nintendo Switch.
 
 `keys: dict[str, bytes]`<br>
 <span class="docs">Encryption keys loaded from `prod.keys`.</span>
+
+`override_advertise_key: bytes = None`<br>
+<span class="docs">Overrides the key that is used to encrypt the advertisement frames. This is normally not required, but can be useful while researching new protocol versions.</span><br>
+`override_data_key: bytes = None`<br>
+<span class="docs">Overrides the key that is used to encrypt data frames. This is normally not required, but can be useful while researching new protocol versions.</span>
 
 ## STANetwork
 <code>**def info**() -> [NetworkInfo](#networkinfo)</code><br>

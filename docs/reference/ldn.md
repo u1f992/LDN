@@ -23,7 +23,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <code>**class** [APNetwork](#apnetwork)</code><br>
 <span class="docs">Represents an active LDN network for an access point.</span>
 
-<code>**async def scan**(keys: dict[str, bytes], ifname: str = "ldn", phyname: str = "phy0", channels: list[int] = [1, 6, 11], dwell_time: float=.110, protocol: int = 1) -> list[[NetworkInfo](#networkinfo)]</code><br>
+<code>**async def scan**(keys: dict[str, bytes], ifname: str = "ldn", phyname: str = "phy0", channels: list[int] = [1, 6, 11], dwell_time: float=.110, protocols: list[int] = [1, 3]) -> list[[NetworkInfo](#networkinfo)]</code><br>
 <span class="docs">Searches for nearby LDN networks on the given WLAN channels. To perform the scanning, this function creates a new interface on the given wiphy. The given interface name must not already be in use. The protocol should be 1 (NX) or 3.<br><br>The `keys` can be read from a `prod.keys` file with the `load_keys` function.</span>
 
 <code>**async with connect**(param: [ConnectNetworkParam](#connectnetworkparam)) -> [STANetwork](#stanetwork)</code><br>

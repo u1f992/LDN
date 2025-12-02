@@ -1208,13 +1208,11 @@ class AcceptPolicyChanged:
 
 
 class AdvertisementMonitor:
-	_key_derivation: KeyDerivation
-	_protocol: int
+	_protocols: dict[int, KeyDerivation]
 	_monitor: wlan.Monitor
 
-	def __init__(self, key_derivation: KeyDerivation, protocol: int, monitor: wlan.Monitor):
-		self._key_derivation = key_derivation
-		self._protocol = protocol
+	def __init__(self, protocols: dict[int, KeyDerivation], monitor: wlan.Monitor):
+		self._protocols = protocols
 		self._monitor = monitor
 	
 	async def receive(self) -> NetworkInfo:
@@ -1238,18 +1236,18 @@ class AdvertisementMonitor:
 				continue
 			
 			# Decode the frame itself
-			frame = AdvertisementFrame(self._key_derivation, self._protocol)
-			try: frame.decode(action.action)
-			except Exception:
-				logger.exception("Failed to parse advertisement frame")
-				continue # Skip invalid frames
-			
-			info = NetworkInfo(self._protocol)
-			info.address = action.source
-			info.channel = wlan.map_frequency(radiotap.frequency)
-			info.band = ChannelBands[info.channel]
-			info.parse_advertisement(frame)
-			return info
+			for protocol, key_derivation in self._protocols.items():
+				frame = AdvertisementFrame(key_derivation, protocol)
+				try: frame.decode(action.action)
+				except Exception:
+					continue # Skip invalid frames
+				
+				info = NetworkInfo(protocol)
+				info.address = action.source
+				info.channel = wlan.map_frequency(radiotap.frequency)
+				info.band = ChannelBands[info.channel]
+				info.parse_advertisement(frame)
+				return info
 
 	async def scan(self, channels: list[int], dwell_time: float) -> list[NetworkInfo]:
 		networks = []
@@ -1806,7 +1804,8 @@ class APNetwork:
 
 async def scan(
 	keys: dict[str, bytes], ifname: str = "ldn", phyname: str = "phy0",
-	channels: list[int] = [1, 6, 11], dwell_time: float = .110, protocol: int = 1
+	channels: list[int] = [1, 6, 11], dwell_time: float = .110,
+	protocols: list[int] = [1, 3]
 ) -> list[NetworkInfo]:
 	if not channels: return []
 
@@ -1814,12 +1813,18 @@ async def scan(
 	for channel in channels:
 		if not wlan.is_valid_channel(channel):
 			raise ValueError("Invalid channel: %i" %channel)
-
-	key_derivation = KeyDerivation(keys, protocol)
+	
+	for protocol in protocols:
+		if protocol not in [1, 3]:
+			raise ValueError("Invalid protocol: %i" %protocol)
+	
+	key_derivations = {
+		protocol: KeyDerivation(keys, protocol) for protocol in protocols
+	}
 
 	async with wlan.create() as factory:
 		async with factory.create_monitor(phyname, ifname) as monitor:
-			scanner = AdvertisementMonitor(key_derivation, protocol, monitor)
+			scanner = AdvertisementMonitor(key_derivations, monitor)
 			return await scanner.scan(channels, dwell_time)
 
 

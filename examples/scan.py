@@ -22,14 +22,15 @@ Platforms = {
 }
 
 async def main():
-	networks = await ldn.scan()
+	keys = ldn.load_keys("~/.switch/prod.keys")
+	networks = await ldn.scan(keys)
 	
 	print("Found %i network(s)" %len(networks))
 	for i, network in enumerate(networks):
 		print()
 		print("Network %i:" %i)
 		print("\tLocal communication id: %016x" %network.local_communication_id)
-		print("\tGame mode: %i" %network.game_mode)
+		print("\tScene id: %i" %network.scene_id)
 		print()
 		print("\tStation accept policy: %s" %AcceptPolicies[network.accept_policy])
 		print("\tMaximum number of participants: %i" %network.max_participants)
@@ -41,12 +42,12 @@ async def main():
 		print("\tSSID: %s" %network.ssid.hex())
 		print()
 		print("\tLDN version: %i" %network.version)
-		print("\tSecurity level: %i" %network.security_level)
+		print("\tSecurity mode: %i" %network.security_mode)
 		print()
 		print("\tParticipants:")
 		for i, participant in enumerate(network.participants):
 			if participant.connected:
-				print("\t\tName: %s" %participant.name)
+				print("\t\tName: %s" %participant.name.decode())
 				print("\t\tIP address: %s" %participant.ip_address)
 				print("\t\tMAC address: %s" %participant.mac_address)
 				print("\t\tApplication version: %i" %participant.app_version)

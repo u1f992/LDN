@@ -53,8 +53,9 @@ def make_application_data():
 async def main():
 	print("Creating network.")
 	param = ldn.CreateNetworkParam()
+	param.keys = ldn.load_keys("~/.switch/prod.keys")
 	param.local_communication_id = 0x01009B90006DC000
-	param.game_mode = 1
+	param.scene_id = 1
 	param.max_participants = 4
 	param.application_data = make_application_data()
 	param.name = NICKNAME.encode()
@@ -66,8 +67,8 @@ async def main():
 			event = await network.next_event()
 			if isinstance(event, ldn.JoinEvent):
 				participant = event.participant
-				print("%s joined the network (%s / %s)" %(participant.name, participant.mac_address, participant.ip_address))
+				print("%s joined the network (%s / %s)" %(participant.name.decode(), participant.mac_address, participant.ip_address))
 			elif isinstance(event, ldn.LeaveEvent):
 				participant = event.participant
-				print("%s left the network (%s / %s)" %(participant.name, participant.mac_address, participant.ip_address))
+				print("%s left the network (%s / %s)" %(participant.name.decode(), participant.mac_address, participant.ip_address))
 trio.run(main)

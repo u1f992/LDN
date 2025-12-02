@@ -7,27 +7,27 @@ import socket
 
 
 LOCAL_COMMUNICATION_ID = 0x01009B90006DC000
-GAME_MODE = 1
+SCENE_ID = 1
 
 PASSWORD = b"LunchPack2DefaultPhrase"
 APPLICATION_VERSION = 6
 
-NICKNAME = b"Hello!"
+NICKNAME = "Hello!"
 
 
-async def scan():
+async def scan(keys):
 	# This function tries to find a nearby network
 	print("Scanning for networks.")
 	print()
 	
-	networks = await ldn.scan()
+	networks = await ldn.scan(keys)
 	print("Found %i network(s)." %len(networks))
 	
 	# Check if one the networks is suitable
 	for i, network in enumerate(networks):
 		if network.local_communication_id != LOCAL_COMMUNICATION_ID:
 			print("\t%i: Skipping (different game)" %i)
-		elif network.game_mode != GAME_MODE:
+		elif network.scene_id != SCENE_ID:
 			print("\t%i: Skipping (different game mode)" %i)
 		elif network.accept_policy == ldn.ACCEPT_NONE:
 			print("\t%i: Skipping (participation is closed)" %i)
@@ -53,8 +53,10 @@ async def receive_packets():
 		print("Received %i bytes from %s" %(len(data), addr))
 
 async def main():
+	keys = ldn.load_keys("~/.switch/prod.keys")
+
 	# First try to find a suitable network
-	info = await scan()
+	info = await scan(keys)
 	if info is None:
 		return
 	
@@ -70,9 +72,10 @@ async def main():
 	# Now try to join the network
 	print("Trying to connect.")
 	param = ldn.ConnectNetworkParam()
+	param.keys = keys
 	param.network = info
 	param.password = PASSWORD
-	param.name = NICKNAME
+	param.name = NICKNAME.encode()
 	param.app_version = APPLICATION_VERSION
 	async with ldn.connect(param) as network:
 		# If this part is reached, we have successfully joined the network
@@ -86,9 +89,9 @@ async def main():
 			while True:
 				event = await network.next_event()
 				if isinstance(event, ldn.JoinEvent):
-					print("%s joined the network (%s)" %(event.participant.name, event.participant.ip_address))
+					print("%s joined the network (%s)" %(event.participant.name.decode(), event.participant.ip_address))
 				elif isinstance(event, ldn.LeaveEvent):
-					print("%s left the network (%s)" %(event.participant.name, event.participant.ip_address))
+					print("%s left the network (%s)" %(event.participant.name.decode(), event.participant.ip_address))
 				elif isinstance(event, ldn.DisconnectEvent):
 					print("Network was disconnected.")
 					break

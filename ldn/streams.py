@@ -3,7 +3,7 @@ import struct
 
 
 class StreamOut:
-	def __init__(self, endian):
+	def __init__(self, endian: str):
 		self.endian = endian
 		self.data = bytearray()
 		self.pos = 0

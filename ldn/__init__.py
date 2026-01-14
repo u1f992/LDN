@@ -146,10 +146,16 @@ class KeyDerivation:
 		return self._derive_key(client_random, source)
 	
 	def derive_data_key(self, server_random: bytes, password: bytes) -> bytes:
+		if self._override_data_key:
+			return self._override_data_key
+		
 		source = bytes.fromhex("f1e7018419a84f711da714c2cf919c9c")
 		return self._derive_key(server_random + password, source)
 	
 	def derive_advertise_key(self, data: bytes) -> bytes:
+		if self._override_advertise_key:
+			return self._override_advertise_key
+		
 		source = bytes.fromhex("191884743e24c77d87c69e4207d0c438")
 		return self._derive_key(data, source)
 

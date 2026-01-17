@@ -458,6 +458,7 @@ class AdvertisementFrame:
 		stream = streams.StreamOut(">")
 		stream.u8(0x7F) # Vendor-specific
 		stream.u24(0x0022AA) # Nintendo
+	
 		stream.u8(4) # LDN
 		stream.pad(1)
 		stream.u16(0x101) # Advertisement frame
@@ -1329,7 +1330,7 @@ class STANetwork:
 		
 		return True
 	
-	def info(self) -> NetworkId:
+	def info(self) -> NetworkInfo:
 		return self._network
 	
 	def participant(self) -> ParticipantInfo:

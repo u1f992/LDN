@@ -140,15 +140,15 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `device_id: int = random.randint(0, 0xFFFFFFFFFFFFFFFF)`<br>
 <span class="docs">The device id for the DRM challenge.</span>
 
-`client_random: bytes = None`<br>
+`client_random: bytes | None = None`<br>
 <span class="docs">Must be 16 bytes. This is used during authentication. If `None`, a random value is generated automatically.</span>
 
 `keys: dict[str, bytes]`<br>
 <span class="docs">The keys that are loaded from `prod.keys`. These can be loaded from a file with the `load_keys` function.</span>
 
-`override_advertise_key: bytes = None`<br>
+`override_advertise_key: bytes | None = None`<br>
 <span class="docs">Overrides the key that is used to decrypt the advertisement frames. This is normally not required, but can be useful while researching new protocol versions.</span><br>
-`override_data_key: bytes = None`<br>
+`override_data_key: bytes | None = None`<br>
 <span class="docs">Overrides the key that is used to encrypt data frames. This is normally not required, but can be useful while researching new protocol versions.</span>
 
 ## CreateNetworkParam
@@ -179,7 +179,7 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">This list contains a blacklist or whitelist, depending on the accept policy.</span><br>
 `security_level: int = 1`<br>
 <span class="docs">The security level of the network. Always `1` in practice.</span><br>
-`ssid: bytes = None`<br>
+`ssid: bytes | None = None`<br>
 <span class="docs">Must contain exactly 16 bytes. If `None`, a random SSID is generated during network creation.</span>
 
 `name: bytes`<br>
@@ -189,9 +189,9 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `platform: int = PLATFORM_NX`<br>
 <span class="docs">The platform that you are playing on. Must be one of the [`PLATFORM_`](#global-constants) constants.</span>
 
-`channel: int = None`<br>
+`channel: int | None = None`<br>
 <span class="docs">The WLAN channel of the network. If `None`, the channel is chosen randomly from `1`, `6` or `11` during network creation.</span><br>
-`server_random: bytes = None`<br>
+`server_random: bytes | None = None`<br>
 <span class="docs">Must be 16 bytes. This is used to generate encryption keys. If `None`, a random key is generated during network creation.</span><br>
 `password: bytes = b""`<br>
 <span class="docs">Password/passphrase. This is used to generate encryption keys.</span>
@@ -209,9 +209,9 @@ Implements the local wireless protocol used by the Nintendo Switch.
 `keys: dict[str, bytes]`<br>
 <span class="docs">Encryption keys loaded from `prod.keys`.</span>
 
-`override_advertise_key: bytes = None`<br>
+`override_advertise_key: bytes | None = None`<br>
 <span class="docs">Overrides the key that is used to encrypt the advertisement frames. This is normally not required, but can be useful while researching new protocol versions.</span><br>
-`override_data_key: bytes = None`<br>
+`override_data_key: bytes | None = None`<br>
 <span class="docs">Overrides the key that is used to encrypt data frames. This is normally not required, but can be useful while researching new protocol versions.</span>
 
 ## STANetwork

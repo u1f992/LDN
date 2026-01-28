@@ -1284,6 +1284,9 @@ class STANetwork:
     def participant(self) -> ParticipantInfo:
         return self._network.participants[self._participant_id]
     
+    def broadcast_address(self) -> str:
+        return f"169.254.{self._network_id}.255"
+    
     async def next_event(self) -> object:
         return await self._events.get()
     
@@ -1651,6 +1654,9 @@ class APNetwork:
     
     def participant(self) -> ParticipantInfo:
         return self._network.participants[0]
+    
+    def broadcast_address(self) -> str:
+        return f"169.254.{self._network_id}.255"
     
     def set_application_data(self, data: bytes) -> None:
         self._network.application_data = data

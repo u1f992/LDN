@@ -1361,7 +1361,6 @@ class STANetwork:
         frame.client_random = self._param.client_random
         frame.payload = request
         
-        input("Press enter to continue...")
         # Attempt authentication up to three times
         for i in range(3):
             await self._interface.send_custom_frame(
@@ -1563,7 +1562,7 @@ class APNetwork:
         if participant.connected:
             frame = DisconnectFrame()
             frame.reason = DISCONNECT_STATION_REJECTED_BY_HOST
-            await self._interface.send_data_frame(
+            await self._interface.send_custom_frame(
                 participant.mac_address, frame.encode()
             )
             await self._interface.remove_station(participant.mac_address)

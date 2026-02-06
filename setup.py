@@ -12,7 +12,7 @@ long_description = \
 
 setuptools.setup(
     name = "ldn",
-    version = "0.0.14",
+    version = "0.0.15",
     description = description,
     long_description = long_description,
     author = "Yannik Marchand",
@@ -22,7 +22,7 @@ setuptools.setup(
     platforms = ["Linux"],
     packages = ["ldn"],
     install_requires = [
-        "python-netlink == 0.0.13",
+        "python-netlink == 0.0.14",
         "pycryptodome"
     ]
 )

@@ -8,10 +8,12 @@ exposed to the user directly.
 
 from __future__ import annotations
 
+from Crypto.Cipher import AES
+
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from netlink import nl80211
+from netlink import nl80211, route
 from ldn import streams, util, queue
 
 import contextlib
@@ -22,6 +24,9 @@ import string
 import struct
 import trio
 import typing
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 SIOCGIFFLAGS = 0x8913
@@ -34,22 +39,22 @@ ETH_P_OUI = 0x88B7
 
 
 IEEE80211_FTYPE_MGMT = 0
-IEEE80211_FTYPE_CTL = 4
-IEEE80211_FTYPE_DATA = 8
-IEEE80211_FTYPE_EXT = 0xC
+IEEE80211_FTYPE_CTL = 1
+IEEE80211_FTYPE_DATA = 2
+IEEE80211_FTYPE_EXT = 3
 
 IEEE80211_STYPE_ASSOC_REQ = 0
-IEEE80211_STYPE_ASSOC_RESP = 0x10
-IEEE80211_STYPE_REASSOC_REQ = 0x20
-IEEE80211_STYPE_REASSOC_RESP = 0x30
-IEEE80211_STYPE_PROBE_REQ = 0x40
-IEEE80211_STYPE_PROBE_RESP = 0x50
-IEEE80211_STYPE_BEACON = 0x80
-IEEE80211_STYPE_ATIM = 0x90
-IEEE80211_STYPE_DISASSOC = 0xA0
-IEEE80211_STYPE_AUTH = 0xB0
-IEEE80211_STYPE_DEAUTH = 0xC0
-IEEE80211_STYPE_ACTION = 0xD0
+IEEE80211_STYPE_ASSOC_RESP = 1
+IEEE80211_STYPE_REASSOC_REQ = 2
+IEEE80211_STYPE_REASSOC_RESP = 3
+IEEE80211_STYPE_PROBE_REQ = 4
+IEEE80211_STYPE_PROBE_RESP = 5
+IEEE80211_STYPE_BEACON = 8
+IEEE80211_STYPE_ATIM = 9
+IEEE80211_STYPE_DISASSOC = 10
+IEEE80211_STYPE_AUTH = 11
+IEEE80211_STYPE_DEAUTH = 12
+IEEE80211_STYPE_ACTION = 13
 
 WLAN_STATUS_SUCCESS = 0
 WLAN_STATUS_UNSPECIFIED_FAILURE = 1
@@ -57,6 +62,7 @@ WLAN_STATUS_ASSOC_DENIED_UNSPEC = 12
 WLAN_STATUS_AP_UNABLE_TO_HANDLE_NEW_STA = 17
 
 WLAN_REASON_UNSPECIFIED = 1
+WLAN_REASON_DISASSOC_STA_HAS_LEFT = 8
 
 def SUITE(oui, id):
     return (oui << 8) | id
@@ -73,7 +79,9 @@ WLAN_EID_DS_PARAMS = 3
 WLAN_EID_SUPPORTED_CHANNELS = 36
 WLAN_EID_HT_CAPABILITY = 45
 WLAN_EID_RSN = 48
+WLAN_EID_EXT_SUPP_RATES = 50
 WLAN_EID_EXT_CAPABILITY = 127
+WLAN_EID_VENDOR_SPECIFIC = 221
 
 
 Channels = {
@@ -172,6 +180,10 @@ class MACAddress:
         """Returns a string representation of the MAC address."""
         return f"MACAddress('{self}')"
     
+    def encode(self) -> bytes:
+        """Returns a bytes representation of the MAC address."""
+        return bytes(self._address)
+    
     def _parse(self, text: str) -> list[int]:
         """Parses the given MAC address string."""
 
@@ -189,10 +201,13 @@ class MACAddress:
 
 @dataclass
 class SSIDElement:
-    ssid: str
+    ssid: str = ""
 
     def encode(self) -> bytes:
         return self.ssid.encode()
+    
+    def decode(self, data: bytes) -> None:
+        self.ssid = data.decode()
 
 
 @dataclass
@@ -316,7 +331,10 @@ class RadiotapFrame:
 
 @dataclass
 class MACHeader:
-    frame_control: int = 0
+    type: int = 0
+    subtype: int = 0
+    flags: int = 0
+
     duration: int = 0
     address1: MACAddress = MACAddress()
     address2: MACAddress = MACAddress()
@@ -324,23 +342,41 @@ class MACHeader:
     sequence_control: int = 0
     
     def encode(self) -> bytes:
+        frame_control = (self.type << 2) | (self.subtype << 4) | \
+            (self.flags << 8)
         stream = streams.StreamOut("<")
-        stream.u16(self.frame_control)
+        stream.u16(frame_control)
         stream.u16(self.duration)
-        stream.write(bytes(self.address1))
-        stream.write(bytes(self.address2))
-        stream.write(bytes(self.address3))
+        stream.write(self.address1.encode())
+        stream.write(self.address2.encode())
+        stream.write(self.address3.encode())
         stream.u16(self.sequence_control)
         return stream.get()
     
     def decode(self, data: bytes) -> None:
         stream = streams.StreamIn(data, "<")
-        self.frame_control = stream.u16()
+
+        frame_control = stream.u16()
+        if frame_control & 3:
+            raise ValueError("Frame has unsupported MAC version number")
+        
+        self.type = (frame_control >> 2) & 3
+        self.subtype = (frame_control >> 4) & 0xF
+        self.flags = frame_control >> 8
+
         self.duration = stream.u16()
         self.address1 = MACAddress(stream.read(6))
         self.address2 = MACAddress(stream.read(6))
         self.address3 = MACAddress(stream.read(6))
         self.sequence_control = stream.u16()
+
+
+class FrameType(typing.Protocol):
+    def decode(self, data: bytes) -> None:
+        ...
+    
+    def encode(self) -> bytes:
+        ...
 
 
 @dataclass
@@ -358,8 +394,8 @@ class AssociationRequest:
         header = MACHeader()
         header.decode(stream.read(24))
 
-        expected_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ
-        if header.frame_control & 0xFF != expected_type:
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_ASSOC_REQ:
             raise ValueError("Frame is not an association request")
         
         self.target = header.address1
@@ -368,6 +404,23 @@ class AssociationRequest:
         self.capability_information = stream.u16()
         self.listen_interval = stream.u16()
         self.elements = decode_elements(stream.readall())
+    
+    def encode(self) -> bytes:
+        stream = streams.StreamOut("<")
+        
+        header = MACHeader()
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_ASSOC_REQ
+        header.address1 = self.target
+        header.address2 = self.source
+        header.address3 = self.target
+        stream.write(header.encode())
+        
+        stream.u16(self.capability_information)
+        stream.u16(self.listen_interval)
+        
+        stream.write(encode_elements(self.elements))
+        return stream.get()
 
 
 @dataclass
@@ -380,12 +433,32 @@ class AssociationResponse:
     aid: int = 0
 
     elements: dict[int, bytes] = field(default_factory=dict)
+
+    def decode(self, data: bytes) -> None:
+        stream = streams.StreamIn(data, "<")
+        
+        header = MACHeader()
+        header.decode(stream.read(24))
+
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_ASSOC_RESP:
+            raise ValueError("Frame is not an association response")
+        
+        self.target = header.address1
+        self.source = header.address2
+        
+        self.capability_information = stream.u16()
+        self.status_code = stream.u16()
+        self.aid = stream.u16()
+
+        self.elements = decode_elements(stream.readall())
         
     def encode(self) -> bytes:
         stream = streams.StreamOut("<")
         
         header = MACHeader()
-        header.frame_control = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_RESP
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_ASSOC_RESP
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.source
@@ -410,12 +483,26 @@ class ProbeRequest:
         header = MACHeader()
         header.decode(stream.read(24))
 
-        expected_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ
-        if header.frame_control != expected_type:
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_PROBE_REQ:
             raise ValueError("Frame is not a probe request")
         
         self.source = header.address2
         self.elements = decode_elements(stream.readall())
+    
+    def encode(self) -> bytes:
+        stream = streams.StreamOut("<")
+        
+        header = MACHeader()
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_PROBE_REQ
+        header.address1 = MACAddress("ff:ff:ff:ff:ff:ff")
+        header.address2 = self.source
+        header.address3 = MACAddress("ff:ff:ff:ff:ff:ff")
+        stream.write(header.encode())
+        
+        stream.write(encode_elements(self.elements))
+        return stream.get()
 
 
 @dataclass
@@ -428,12 +515,30 @@ class ProbeResponse:
     capability_information: int = 0
 
     elements: dict[int, bytes] = field(default_factory=dict)
+
+    def decode(self, data: bytes) -> None:
+        stream = streams.StreamIn(data, "<")
+        
+        header = MACHeader()
+        header.decode(stream.read(24))
+
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_PROBE_RESP:
+            raise ValueError("Frame is not a probe response")
+        
+        self.target = header.address1
+        self.source = header.address2
+        self.timestamp = stream.u64()
+        self.beacon_interval = stream.u16()
+        self.capability_information = stream.u16()
+        self.elements = decode_elements(stream.readall())
     
     def encode(self) -> bytes:
         stream = streams.StreamOut("<")
         
         header = MACHeader()
-        header.frame_control = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_RESP
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_PROBE_RESP
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.source
@@ -455,12 +560,29 @@ class BeaconFrame:
     capability_information: int = 0
 
     elements: dict[int, bytes] = field(default_factory=dict)
+
+    def decode(self, data: bytes) -> None:
+        stream = streams.StreamIn(data, "<")
+        
+        header = MACHeader()
+        header.decode(stream.read(24))
+
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_BEACON:
+            raise ValueError("Frame is not a beacon frame")
+        
+        self.source = header.address2
+        self.timestamp = stream.u64()
+        self.beacon_interval = stream.u16()
+        self.capability_information = stream.u16()
+        self.elements = decode_elements(stream.readall())
         
     def encode(self) -> bytes:
         stream = streams.StreamOut("<")
         
         header = MACHeader()
-        header.frame_control = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_BEACON
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_BEACON
         header.address1 = MACAddress("ff:ff:ff:ff:ff:ff")
         header.address2 = self.source
         header.address3 = self.source
@@ -477,6 +599,8 @@ class BeaconFrame:
 class DisassociationFrame:
     target: MACAddress = MACAddress()
     source: MACAddress = MACAddress()
+    bssid: MACAddress = MACAddress()
+
     reason: int = 0
     elements: dict[int, bytes] = field(default_factory=dict)
     
@@ -486,14 +610,31 @@ class DisassociationFrame:
         header = MACHeader()
         header.decode(stream.read(24))
 
-        expected_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DISASSOC
-        if header.frame_control != expected_type:
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_DISASSOC:
             raise ValueError("Frame is not a disassociation frame")
         
         self.target = header.address1
         self.source = header.address2
+        self.bssid = header.address3
+
         self.reason = stream.u16()
         self.elements = decode_elements(stream.readall())
+    
+    def encode(self) -> bytes:
+        stream = streams.StreamOut("<")
+        
+        header = MACHeader()
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_AUTH
+        header.address1 = self.target
+        header.address2 = self.source
+        header.address3 = self.bssid
+        stream.write(header.encode())
+        
+        stream.u16(self.reason)
+        stream.write(encode_elements(self.elements))
+        return stream.get()
 
 
 @dataclass
@@ -514,8 +655,8 @@ class AuthenticationFrame:
         header = MACHeader()
         header.decode(stream.read(24))
 
-        expected_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH
-        if header.frame_control & 0xFF != expected_type:
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_AUTH:
             raise ValueError("Frame is not an authentication frame")
         
         self.target = header.address1
@@ -532,7 +673,8 @@ class AuthenticationFrame:
         stream = streams.StreamOut("<")
         
         header = MACHeader()
-        header.frame_control = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_AUTH
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.bssid
@@ -561,8 +703,8 @@ class DeauthenticationFrame:
         header = MACHeader()
         header.decode(stream.read(24))
 
-        expected_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH
-        if header.frame_control & 0xFF != expected_type:
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_DEAUTH:
             raise ValueError("Frame is not an deauthentication frame")
 
         self.target = header.address1
@@ -577,7 +719,8 @@ class DeauthenticationFrame:
         stream = streams.StreamOut("<")
         
         header = MACHeader()
-        header.frame_control = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_DEAUTH
         header.address1 = self.target
         header.address2 = self.source
         header.address3 = self.bssid
@@ -599,8 +742,8 @@ class ActionFrame:
         header = MACHeader()
         header.decode(stream.read(24))
 
-        expected_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION
-        if header.frame_control & 0xFF != expected_type:
+        if header.type != IEEE80211_FTYPE_MGMT or \
+           header.subtype != IEEE80211_STYPE_ACTION:
             raise ValueError("Frame is not an action frame")
         
         self.source = header.address2
@@ -609,7 +752,8 @@ class ActionFrame:
     
     def encode(self) -> bytes:
         header = MACHeader()
-        header.frame_control = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION
+        header.type = IEEE80211_FTYPE_MGMT
+        header.subtype = IEEE80211_STYPE_ACTION
         header.address1 = MACAddress("ff:ff:ff:ff:ff:ff")
         header.address2 = self.source
         header.address3 = MACAddress("ff:ff:ff:ff:ff:ff")
@@ -618,6 +762,161 @@ class ActionFrame:
         stream.write(header.encode())
         stream.write(self.action)
         return stream.get()
+
+
+@dataclass
+class DataFrame:
+    target: MACAddress = MACAddress()
+    source: MACAddress = MACAddress()
+    bssid: MACAddress = MACAddress()
+
+    fromds: bool = False
+    tods: bool = False
+
+    protected: bool = False
+
+    nonce: int = 0
+    keyid: int = 0
+
+    payload: bytes = b""
+
+    def decode(self, data: bytes) -> None:
+        stream = streams.StreamIn(data, "<")
+
+        header = MACHeader()
+        header.decode(stream.read(24))
+
+        if header.type != IEEE80211_FTYPE_DATA or header.subtype != 0:
+            raise ValueError("Frame is not a data frame")
+        
+        self.tods = bool(header.flags & 1)
+        self.fromds = bool(header.flags & 2)
+        self.protected = bool(header.flags & 0x40)
+
+        self.target = header.address1
+        self.source = header.address2
+        self.bssid = header.address3
+
+        if self.protected:
+            nonce = stream.u16()
+            extra = stream.u16()
+            nonce |= stream.u32() << 16
+
+            self.nonce = nonce
+            self.keyid = (extra >> 6) & 3
+            if not extra & 0x2000:
+                raise ValueError("Ext IV was expected in protected frame")
+
+        self.payload = stream.readall()
+
+    def encode(self) -> bytes:
+        header = MACHeader()
+        header.type = IEEE80211_FTYPE_DATA
+        header.address1 = self.target
+        header.address2 = self.source
+        header.address3 = self.bssid
+        header.flags = self.tods | (self.fromds << 1) | (self.protected << 6)
+        
+        stream = streams.StreamOut("<")
+        stream.write(header.encode())
+
+        if self.protected:
+            extra = 0x20 | (self.keyid) << 6
+            stream.u16(self.nonce & 0xFFFF)
+            stream.u16(extra)
+            stream.u32(self.nonce >> 16)
+        
+        stream.write(self.payload)
+        return stream.get()
+
+    def decrypt(self, key: bytes) -> None:
+        """Decrypts the frame if it is protected."""
+
+        if not self.protected:
+            return
+        
+        ciphertext = self.payload[:-8]
+        mac = self.payload[-8:]
+        
+        aes = AES.new(key, AES.MODE_CCM, nonce=self._nonce(), mac_len=8)
+        aes.update(self._aad())
+        self.payload = aes.decrypt_and_verify(ciphertext, mac)
+
+        self.protected = False
+    
+    def encrypt(self, key: bytes, packetno: int, keyid: int) -> None:
+        if self.protected:
+            raise ValueError("Data frame is already protected")
+        
+        self.protected = True
+        self.nonce = packetno
+        self.keyid = keyid
+        
+        aes = AES.new(key, AES.MODE_CCM, nonce=self._nonce(), mac_len=8)
+        aes.update(self._aad())
+        ciphertext, mac = aes.encrypt_and_digest(self.payload)
+        
+        self.payload = ciphertext + mac
+    
+    def _nonce(self) -> bytes:
+        """Returns the nonce that is used for the AES-CCMP algorithm."""
+        nonce = b"\0" # Priority
+        nonce += self.source.encode()
+        nonce += struct.pack(">Q", self.nonce)[2:]
+        return nonce
+    
+    def _aad(self) -> bytes:
+        """
+        Returns the additional authenticated data for the AES-CCMP algorithm.
+        """
+        frame_control = IEEE80211_FTYPE_DATA << 2
+        frame_control |= self.tods << 8
+        frame_control |= self.fromds << 9
+        frame_control |= self.protected << 14
+
+        aad = struct.pack("<H", frame_control)
+        aad += self.target.encode()
+        aad += self.source.encode()
+        aad += self.bssid.encode()
+        aad += bytes(2) # Fragment number
+        return aad
+
+
+@dataclass
+class SNAPHeader:
+    oui: int = 0
+    protocol: int = 0
+    payload: bytes = b""
+
+    def decode(self, data: bytes) -> None:
+        stream = streams.StreamIn(data, ">")
+        if stream.read(3) != b"\xAA\xAA\x03":
+            raise ValueError("SNAP extension is required")
+        
+        self.oui = stream.u24()
+        self.protocol = stream.u16()
+        self.payload = stream.readall()
+    
+    def encode(self) -> bytes:
+        stream = streams.StreamOut(">")
+        stream.write(b"\xAA\xAA\x03")
+        stream.u24(self.oui)
+        stream.u16(self.protocol)
+        stream.write(self.payload)
+        return stream.get()
+
+
+FrameTypes: dict[int, type[FrameType]] = {
+    IEEE80211_STYPE_ASSOC_REQ: AssociationRequest,
+    IEEE80211_STYPE_ASSOC_RESP: AssociationResponse,
+    IEEE80211_STYPE_PROBE_REQ: ProbeRequest,
+    IEEE80211_STYPE_PROBE_RESP: ProbeResponse,
+    IEEE80211_STYPE_BEACON: BeaconFrame,
+    IEEE80211_STYPE_DISASSOC: DisassociationFrame,
+    IEEE80211_STYPE_AUTH: AuthenticationFrame,
+    IEEE80211_STYPE_DEAUTH: DeauthenticationFrame,
+    IEEE80211_STYPE_ACTION: ActionFrame
+}
 
 
 @dataclass
@@ -631,114 +930,182 @@ class DisassociationEvent:
 
 
 @dataclass
-class FrameEvent:
+class ActionFrameEvent:
     frame: ActionFrame
     frequency: int
 
 
 @dataclass
-class DataFrameEvent:
+class CustomFrameEvent:
     address: MACAddress
     data: bytes
 
 
-type EventType = AssociationEvent | DisassociationEvent | FrameEvent | \
-    DataFrameEvent
-
-type FrameType = AssociationRequest | AssociationResponse | ProbeRequest | \
-    ProbeResponse | BeaconFrame | DisassociationFrame | AuthenticationFrame | \
-    DeauthenticationFrame | ActionFrame
+type EventType = AssociationEvent | DisassociationEvent | ActionFrameEvent | \
+    CustomFrameEvent
 
 
 class Interface:
     """Class that provides common operations for WLAN interfaces."""
 
     _wlan: nl80211.NL80211
-    _socket: socket.socket
+    _router: route.RouteController
 
-    phy: int
-    index: int
-    name: str
-    type: int
-    address: MACAddress
+    _name: str
+    _index: int
+    _address: MACAddress | None
+
+    _socket: trio.socket.SocketType
 
     def __init__(
-        self, wlan: nl80211.NL80211, attributes: dict[int, typing.Any]
+        self, wlan: nl80211.NL80211, router: route.RouteController, name: str,
+        index: int | None = None, address: MACAddress | None = None
     ):
         self._wlan = wlan
-        
-        self.phy = attributes[nl80211.NL80211_ATTR_WIPHY]
-        self.index = attributes[nl80211.NL80211_ATTR_IFINDEX]
-        self.name = attributes[nl80211.NL80211_ATTR_IFNAME]
-        self.type = attributes[nl80211.NL80211_ATTR_IFTYPE]
-        self.address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
-        
-        self._socket = socket.socket()
-    
-    def getflags(self) -> int:
-        """Requests the active flags of the interface."""
-        req = struct.pack("16sH", self.name.encode(), 0)
-        res = fcntl.ioctl(self._socket.fileno(), SIOCGIFFLAGS, req)
-        return struct.unpack_from("H", res, 16)[0]
-    
-    def setflags(self, flags: int) -> None:
-        """Sets the active flags on the interface."""
-        # This is really slow, but there doesn't seem to be
-        # an async implementation of fcntl.ioctl :(
-        req = struct.pack("16sH", self.name.encode(), flags)
-        fcntl.ioctl(self._socket.fileno(), SIOCSIFFLAGS, req)
-    
-    def disable_ipv6(self) -> None:
-        """Disables IPv6 on the interface."""
-        with open(f"/proc/sys/net/ipv6/conf/{self.name}/disable_ipv6", "w") as f:
-            f.write("1")
+        self._router = router
+        self._name = name
+
+        if index is None:
+            index = socket.if_nametoindex(name)
+        self._index = index
+
+        self._address = address
+
+        self._socket = trio.socket.socket()
     
     def up(self) -> None:
         """Marks the interface as 'up', changing it to a running state."""
-        self.setflags(self.getflags() | IFF_UP)
-        
+        self._setflags(self._getflags() | IFF_UP)
+    
+    def disable_ipv6(self) -> None:
+        """Disables IPv6 on the interface."""
+        filename = f"/proc/sys/net/ipv6/conf/{self._name}/disable_ipv6"
+        with open(filename, "w") as f:
+            f.write("1")
+    
+    def name(self) -> str:
+        return self._name
+
+    def index(self) -> int:
+        return self._index
+    
+    def address(self) -> MACAddress:
+        if self._address is None:
+            raise ValueError("This interface does not have a MAC address")
+        return self._address
+    
+    async def add_address(
+        self, local: str, broadcast: str, prefix: int = 24
+    ) -> None:
+        attrs = {
+            route.IFA_LOCAL: socket.inet_aton(local),
+            route.IFA_BROADCAST: socket.inet_aton(broadcast)
+        }
+        await self._router.add_address(
+            socket.AF_INET, prefix, route.IFA_F_PERMANENT,
+            route.RT_SCOPE_UNIVERSE, self._index, attrs
+        )
+    
+    async def add_neighbor(self, ipaddr: str, macaddr: MACAddress) -> None:
+        attrs = {
+            route.NDA_DST: socket.inet_aton(ipaddr),
+            route.NDA_LLADDR: macaddr.encode()
+        }
+        await self._router.add_neighbor(
+            socket.AF_INET, self.index(), route.NUD_PERMANENT, 0, 0, attrs
+        )
+    
+    async def remove_neighbor(self, ipaddr: str, macaddr: MACAddress) -> None:
+        attrs = {
+            route.NDA_DST: socket.inet_aton(ipaddr),
+            route.NDA_LLADDR: macaddr.encode()
+        }
+        await self._router.remove_neighbor(
+            socket.AF_INET, self.index(), route.NUD_PERMANENT, 0, 0, attrs
+        )
+    
     async def set_channel(self, channel: int) -> None:
-        """Changes the channel on which the interface is active."""
+        """Changes the channel on which the monitor is active."""
 
         if channel not in Channels:
             raise ValueError("Invalid channel: %i" %channel)
         
         attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index,
+            nl80211.NL80211_ATTR_IFINDEX: self.index(),
             nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[channel]
         }
         await self._wlan.request(nl80211.NL80211_CMD_SET_CHANNEL, attrs)
+    
+    async def _register_frame(self, type: int, match: bytes = b"") -> None:
+        """Tells the driver to start listening for a specific frame type."""
+        type = (type << 4) | (IEEE80211_FTYPE_MGMT << 2)
+        attrs = {
+            nl80211.NL80211_ATTR_IFINDEX: self.index(),
+            nl80211.NL80211_ATTR_FRAME_TYPE: type,
+            nl80211.NL80211_ATTR_FRAME_MATCH: match
+        }
+        await self._wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
+    
+    def _getflags(self) -> int:
+        """Requests the active flags of the interface."""
+        req = struct.pack("16sH", self._name.encode(), 0)
+        res = fcntl.ioctl(self._socket.fileno(), SIOCGIFFLAGS, req)
+        return struct.unpack_from("H", res, 16)[0]
+    
+    def _setflags(self, flags: int) -> None:
+        """Sets the active flags on the interface."""
+        # This is really slow, but there doesn't seem to be
+        # an async implementation of fcntl.ioctl :(
+        req = struct.pack("16sH", self._name.encode(), flags)
+        fcntl.ioctl(self._socket.fileno(), SIOCSIFFLAGS, req)
 
 
-class Monitor:
+class Monitor(Interface):
     """
-    Represents an interface in monitor mode. This class can be used to receive
-    raw radiotap frames.
+    Represents an interface in monitor mode. This class can be used to send and
+    receive raw IEEE 802.11 frames. It also provides utilities such as changing
+    channels and filtering based on the BSSID.
     """
-
-    _wlan: nl80211.NL80211
-    _interface: Interface
 
     _socket: trio.socket.SocketType
+
+    _filter: MACAddress | None
     
-    def __init__(self, wlan: nl80211.NL80211, interface: Interface):
-        self._wlan = wlan
-        self._interface = interface
-        
+    def __init__(
+        self, wlan: nl80211.NL80211, router: route.RouteController, name: str,
+        index: int, address: MACAddress
+    ):
+        super().__init__(wlan, router, name, index, address)
+
         self._socket = trio.socket.socket(
             socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)
         )
+
+        self._filter = None
     
-    async def bind(self) -> None:
+    def set_filter(self, filter: MACAddress | str | None) -> None:
+        """This method can be used to filter incoming frames on BSSID."""
+        if isinstance(filter, str):
+            filter = MACAddress(filter)
+        
+        self._filter = filter
+    
+    async def activate(self) -> None:
         """
         Ensures that the raw socket is bound to the underlying interface. This
         method must be called exactly once before radiotap frames can be
         received.
         """
-        await self._socket.bind((self._interface.name, 0))
+        self.up()
+        await self._socket.bind((self.name(), 0))
     
     async def recv(self) -> RadiotapFrame:
-        """Waits until a radiotap frame arrives and returns it."""
+        """
+        Waits until a radiotap frame arrives and returns it.
+
+        Note: these frames are not filtered on BSSID. Use recv_frame if you want
+        to use filtering.
+        """
         while True:
             data = await self._socket.recv(4096)
             radiotap = RadiotapFrame()
@@ -746,22 +1113,59 @@ class Monitor:
                 radiotap.decode(data)
                 return radiotap
             except Exception:
-                pass # Ignore invalid frames
+                logger.debug("Ignoring invalid radiotap frame")
     
     async def send(self, frame: RadiotapFrame) -> None:
         """Sends a radiotap frame through the underlying interface."""
         await self._socket.send(frame.encode())
     
-    async def set_channel(self, channel: int) -> None:
-        """Changes the channel on which the monitor is active."""
-        await self._interface.set_channel(channel)
+    async def recv_frame(self) -> FrameType:
+        """
+        Waits until an IEEE 802.11 frame arrives, parses it and returns it.
+        """
+        while True:
+            radiotap = await self.recv()
+            try:
+                frame = self._parse_frame(radiotap.data)
+                if frame is not None:
+                    return frame
+            except Exception:
+                logger.debug("Ignoring invalid frame")
+    
+    async def send_frame(self, frame: FrameType) -> None:
+        """Sends an IEEE 802.11 through the underlying interface."""
+        radiotap = RadiotapFrame(frame.encode())
+        await self.send(radiotap)
+    
+    def _parse_frame(self, data: bytes) -> FrameType | None:
+        """
+        Parses an IEEE 802.11 frame and returns it. Raises an exception if the
+        frame cannot be parsed.
+        """
+        header = MACHeader()
+        header.decode(data)
+
+        # Check BSSID filter
+        bssid = header.address3
+        if bssid != MACAddress("ff:ff:ff:ff:ff:ff") and \
+           self._filter is not None and bssid != self._filter:
+            return None
+        
+        if header.type == IEEE80211_FTYPE_MGMT:
+            frame = FrameTypes[header.subtype]()
+            frame.decode(data)
+            return frame
+        elif header.type == IEEE80211_FTYPE_DATA:
+            frame = DataFrame()
+            frame.decode(data)
+            return frame
+        else:
+            logger.debug("Ignoring unsupported frame type")
+            return None
 
 
-class STAInterface:
+class Station(Interface):
     """Represents an interface in station mode."""
-
-    _wlan: nl80211.NL80211
-    _interface: Interface
 
     _ssid: str
     _channel: int
@@ -772,11 +1176,12 @@ class STAInterface:
     _events: queue.Queue[EventType]
     
     def __init__(
-        self, wlan: nl80211.NL80211, interface: Interface, ssid: str,
-        channel: int, key: bytes | None
+        self, wlan: nl80211.NL80211, router: route.RouteController, name: str,
+        index: int, address: MACAddress, ssid: str, channel: int,
+        key: bytes | None
     ):
-        self._wlan = wlan
-        self._interface = interface
+        super().__init__(wlan, router, name, index, address)
+        
         self._ssid = ssid
         self._channel = channel
         self._key = key
@@ -785,20 +1190,12 @@ class STAInterface:
         
         self._events = queue.create()
     
-    def address(self) -> MACAddress:
-        """Returns the local MAC address of the interface."""
-        return self._interface.address
-    
-    def index(self) -> int:
-        """Returns the interface index."""
-        return self._interface.index
-    
     async def next_event(self) -> EventType:
         """Blocks until an interesting event occurs and returns it."""
         return await self._events.get()
     
-    async def send_data_frame(self, addr: MACAddress, frame: bytes) -> None:
-        """Sends a frame to the given address."""
+    async def send_custom_frame(self, addr: MACAddress, frame: bytes) -> None:
+        """Sends a control port frame to the given address."""
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
             nl80211.NL80211_ATTR_FRAME: frame,
@@ -815,16 +1212,22 @@ class STAInterface:
         complete, or raises an exception if the connection fails. Disconnects
         from the network when the context manager exits.
         """
-        self._interface.disable_ipv6()
+        self.up()
+        self.disable_ipv6()
         async with self._connect_network():
             async with util.background_task(self._process_messages):
-                await self._register_frame(
-                    IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION
-                )
+                await self._register_frame(IEEE80211_STYPE_ACTION)
                 yield
     
     async def _register_key(self, key: bytes) -> None:
-        """Adds the encryption key to the underlying driver."""
+        """
+        Adds the encryption key to the underlying driver:
+        * Key index 0 is used for direct frames
+        * Key index 1 is used for broadcast frames
+
+        TODO: figure out if direct frames are ever used by the Nintendo Switch,
+        and if yes, should we create a new key for each station separately?
+        """
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
             nl80211.NL80211_ATTR_MAC: self._host_address,
@@ -914,15 +1317,6 @@ class STAInterface:
             attrs = {nl80211.NL80211_ATTR_IFINDEX: self.index()}
             await self._wlan.request(nl80211.NL80211_CMD_DISCONNECT, attrs)
     
-    async def _register_frame(self, type: int, match: bytes = b"") -> None:
-        """Tells the driver to start listening for a specific frame type."""
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_FRAME_TYPE: type,
-            nl80211.NL80211_ATTR_FRAME_MATCH: match
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
-    
     async def _process_messages(self) -> None:
         """
         Processes messages from the underlying driver and adds interesting
@@ -934,17 +1328,22 @@ class STAInterface:
                 frame = ActionFrame()
                 frame.decode(message.attributes[nl80211.NL80211_ATTR_FRAME])
                 freq = message.attributes[nl80211.NL80211_ATTR_WIPHY_FREQ]
-                await self._events.put(FrameEvent(frame, freq))
+                await self._events.put(ActionFrameEvent(frame, freq))
             elif message.type == nl80211.NL80211_CMD_CONTROL_PORT_FRAME:
                 mac = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
                 data = message.attributes[nl80211.NL80211_ATTR_FRAME]
-                await self._events.put(DataFrameEvent(mac, data))
+                await self._events.put(CustomFrameEvent(mac, data))
             elif message.type == nl80211.NL80211_CMD_DEL_STATION:
                 mac = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
                 await self._events.put(DisassociationEvent(mac))
     
     async def set_authorized(self) -> None:
-        """Marks the interface as being authorized."""
+        """
+        Marks the interface as being authorized.
+
+        TODO: when there are more participants in the network, should we mark
+        them as authorized as well?
+        """
         flag = 1 << nl80211.NL80211_STA_FLAG_AUTHORIZED
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
@@ -954,10 +1353,9 @@ class STAInterface:
         await self._wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
 
 
-class APInterface:
-    """Represents an interface in access point mode."""
+class P2PGroupOwner(Interface):
+    """This class represents a P2P group owner interface."""
 
-    _wlan: nl80211.NL80211
     _interface: Interface
 
     _ssid: str
@@ -971,11 +1369,12 @@ class APInterface:
     _events: queue.Queue[EventType]
     
     def __init__(
-        self, wlan: nl80211.NL80211, interface: Interface, ssid: str,
-        channel: int, key: bytes | None, max_stations: int
+        self, wlan: nl80211.NL80211, router: route.RouteController, ifname: str,
+        index: int, address: MACAddress, ssid: str, channel: int,
+        key: bytes | None, max_stations: int
     ):
-        self._wlan = wlan
-        self._interface = interface
+        super().__init__(wlan, router, ifname, index, address)
+
         self._ssid = ssid
         self._channel = channel
         self._key = key
@@ -985,40 +1384,33 @@ class APInterface:
         self._stations_by_address = {}
         
         self._events = queue.create()
-    
-    def address(self) -> MACAddress:
-        """Returns the local MAC address of the interface."""
-        return self._interface.address
-    
-    def index(self) -> int:
-        """Returns the interface index."""
-        return self._interface.index
 
     async def next_event(self):
         """Blocks until an interesting event occurs and returns it."""
         return await self._events.get()
     
     @contextlib.asynccontextmanager
-    async def start(self) -> AsyncIterator[None]:
+    async def create(self) -> AsyncIterator[None]:
         """
         Starts an access point on the underlying interface. The access point is
         stopped when the context manager exits.
         """
-        self._interface.disable_ipv6()
+        self.up()
+        self.disable_ipv6()
         async with self._start_ap():
             for type in [
-                IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ,
-                IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ,
-                IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DISASSOC,
-                IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH,
-                IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH,
+                IEEE80211_STYPE_ASSOC_REQ,
+                IEEE80211_STYPE_PROBE_REQ,
+                IEEE80211_STYPE_DISASSOC,
+                IEEE80211_STYPE_AUTH,
+                IEEE80211_STYPE_DEAUTH
             ]:
                 await self._register_frame(type)
             
             async with util.background_task(self._process_messages):
                 yield
     
-    async def send_data_frame(self, addr: MACAddress, frame: bytes) -> None:
+    async def send_custom_frame(self, addr: MACAddress, frame: bytes) -> None:
         """Transmits a control port frame through the underlying interface."""
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
@@ -1037,7 +1429,7 @@ class APInterface:
         flag = 1 << nl80211.NL80211_STA_FLAG_AUTHORIZED
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: bytes(addr),
+            nl80211.NL80211_ATTR_MAC: addr.encode(),
             nl80211.NL80211_ATTR_STA_FLAGS2: struct.pack("II", flag, flag)
         }
         await self._wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
@@ -1055,11 +1447,11 @@ class APInterface:
         frame.target = addr
         frame.bssid = self.address()
         frame.reason = WLAN_REASON_UNSPECIFIED
-        await self._send_frame(frame.encode())
+        await self.send_frame(frame.encode())
         
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: bytes(addr),
+            nl80211.NL80211_ATTR_MAC: addr.encode(),
             nl80211.NL80211_ATTR_REASON_CODE: WLAN_REASON_UNSPECIFIED
         }
         await self._wlan.request(nl80211.NL80211_CMD_DEL_STATION, attrs)
@@ -1067,7 +1459,7 @@ class APInterface:
     def _create_beacon_head(self) -> bytes:
         """Creates and encodes a beacon frame for transmission."""
         frame = BeaconFrame()
-        frame.source = self._interface.address
+        frame.source = self.address()
         frame.beacon_interval = 100
         frame.capability_information = 0x511
         return frame.encode()
@@ -1149,27 +1541,15 @@ class APInterface:
         header = MACHeader()
         header.decode(data)
 
-        association_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ
-        probe_request_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ
-        disassociation_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DISASSOC
-        authentication_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH
-        deauthentication_type = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DEAUTH
-        
-        frame = {
-            association_type: AssociationRequest,
-            probe_request_type: ProbeRequest,
-            disassociation_type: DisassociationFrame,
-            authentication_type: AuthenticationFrame,
-            deauthentication_type: DeauthenticationFrame,
-        }[header.frame_control]()
+        frame = FrameTypes[header.subtype]()
         frame.decode(data)
         return frame
     
     @contextlib.asynccontextmanager
     async def _start_ap(self) -> AsyncIterator[None]:
         """
-        Sends the nl80211 messages that are required to start an access point.
-        The access point is stopped when the context manager exits.
+        Sends the nl80211 messages that are required to create an IBSS.
+        The IBSS is destroyed when the context manager exits.
         """
         beacon_head = self._create_beacon_head()
         beacon_tail = self._create_beacon_tail()
@@ -1177,22 +1557,29 @@ class APInterface:
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
             nl80211.NL80211_ATTR_SSID: self._ssid.encode(),
+            nl80211.NL80211_ATTR_MAC: self.address().encode(),
+            nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[self._channel],
             nl80211.NL80211_ATTR_BEACON_HEAD: beacon_head,
             nl80211.NL80211_ATTR_BEACON_TAIL: beacon_tail,
             nl80211.NL80211_ATTR_BEACON_INTERVAL: 100,
             nl80211.NL80211_ATTR_DTIM_PERIOD: 3,
-            #nl80211.NL80211_ATTR_HIDDEN_SSID:
-            #    nl80211.NL80211_HIDDEN_SSID_ZERO_CONTENTS,
-            nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[self._channel],
+            nl80211.NL80211_ATTR_HIDDEN_SSID:
+                nl80211.NL80211_HIDDEN_SSID_ZERO_CONTENTS,
             nl80211.NL80211_ATTR_CONTROL_PORT: True,
             nl80211.NL80211_ATTR_CONTROL_PORT_ETHERTYPE:
                 struct.pack("H", ETH_P_OUI),
             nl80211.NL80211_ATTR_CONTROL_PORT_OVER_NL80211: True,
             nl80211.NL80211_ATTR_SOCKET_OWNER: True
-            
         }
+
         await self._wlan.request(nl80211.NL80211_CMD_START_AP, attrs)
-        
+
+        # Wait until the AP is ready
+        while True:
+            message = await self._wlan.receive()
+            if message.type == nl80211.NL80211_CMD_START_AP:
+                break
+
         if self._key is not None:
             attrs = {
                 nl80211.NL80211_ATTR_IFINDEX: self.index(),
@@ -1222,15 +1609,6 @@ class APInterface:
             attrs = {nl80211.NL80211_ATTR_IFINDEX: self.index()}
             await self._wlan.request(nl80211.NL80211_CMD_STOP_AP, attrs)
     
-    async def _register_frame(self, type, match=b""):
-        """Tells the driver to start listening for a specific frame type."""
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_FRAME_TYPE: type,
-            nl80211.NL80211_ATTR_FRAME_MATCH: match
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
-    
     async def _process_messages(self):
         """
         Processes messages from the underlying driver and adds interesting
@@ -1248,7 +1626,7 @@ class APInterface:
             elif message.type == nl80211.NL80211_CMD_CONTROL_PORT_FRAME:
                 address = MACAddress(message.attributes[nl80211.NL80211_ATTR_MAC])
                 data = message.attributes[nl80211.NL80211_ATTR_FRAME]
-                await self._events.put(DataFrameEvent(address, data))
+                await self._events.put(CustomFrameEvent(address, data))
     
     async def _process_frame(self, frame: FrameType) -> None:
         """
@@ -1258,7 +1636,7 @@ class APInterface:
             ssid = frame.elements.get(WLAN_EID_SSID)
             if ssid == self._ssid.encode():
                 probe_response = self._create_probe_response(frame.source)
-                await self._send_frame(probe_response)
+                await self.send_frame(probe_response)
         elif isinstance(frame, AuthenticationFrame):
             if frame.bssid == self.address():
                 if frame.algorithm == WLAN_AUTH_OPEN and frame.sequence == 1:
@@ -1269,12 +1647,12 @@ class APInterface:
                     auth_response.algorithm = WLAN_AUTH_OPEN
                     auth_response.sequence = 2
                     auth_response.status_code = WLAN_STATUS_SUCCESS
-                    await self._send_frame(auth_response.encode())
+                    await self.send_frame(auth_response.encode())
         elif isinstance(frame, AssociationRequest):
             ssid = frame.elements.get(WLAN_EID_SSID)
             if ssid == self._ssid.encode():
                 response = await self._process_association_request(frame)
-                await self._send_frame(response)
+                await self.send_frame(response)
         elif isinstance(frame, (DisassociationFrame, DeauthenticationFrame)):
             await self._process_disassociation(frame)
     
@@ -1334,7 +1712,7 @@ class APInterface:
         if self._key is not None:
             attrs = {
                 nl80211.NL80211_ATTR_IFINDEX: self.index(),
-                nl80211.NL80211_ATTR_MAC: bytes(frame.source),
+                nl80211.NL80211_ATTR_MAC: frame.source.encode(),
                 nl80211.NL80211_ATTR_KEY: {
                     nl80211.NL80211_KEY_IDX: 0,
                     nl80211.NL80211_KEY_DATA: self._key,
@@ -1362,15 +1740,15 @@ class APInterface:
 
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: bytes(frame.source),
-            nl80211.NL80211_ATTR_MGMT_SUBTYPE: subtype >> 4,
+            nl80211.NL80211_ATTR_MAC: frame.source.encode(),
+            nl80211.NL80211_ATTR_MGMT_SUBTYPE: subtype,
             nl80211.NL80211_ATTR_REASON_CODE: frame.reason
         }
         await self._wlan.request(nl80211.NL80211_CMD_DEL_STATION, attrs)
         
         await self._events.put(DisassociationEvent(frame.source))
     
-    async def _send_frame(self, data: bytes) -> None:
+    async def send_frame(self, data: bytes) -> None:
         """Sends a management frame."""
         attrs = {
             nl80211.NL80211_ATTR_IFINDEX: self.index(),
@@ -1379,63 +1757,118 @@ class APInterface:
         await self._wlan.request(nl80211.NL80211_CMD_FRAME, attrs)
 
 
-class WLAN:
+class Factory:
     """Acts as a factory for WLAN Interfaces"""
 
     _wlan: nl80211.NL80211
+    _router: route.RouteController
     
-    def __init__(self, wlan: nl80211.NL80211):
+    def __init__(self, wlan: nl80211.NL80211, router: route.RouteController):
         self._wlan = wlan
         self._wlan.add_membership("mlme")
+
+        self._router = router
     
     @contextlib.asynccontextmanager
     async def create_monitor(
-        self, phy: str, name: str
+        self, phyname: str, ifname: str, channel: int | None = None
     ) -> AsyncIterator[Monitor]:
         """
         Creates an interface in monitor mode on the given phy with the given
-        name.
+        name. If a channel is provided, the phy is immediately switched to the
+        given channel.
         """
-        attrs = {
+        flags = {
             nl80211.NL80211_ATTR_MNTR_FLAGS: {
                 nl80211.NL80211_MNTR_FLAG_OTHER_BSS: True
             }
         }
         async with self._create_interface(
-            phy, name, nl80211.NL80211_IFTYPE_MONITOR, attrs
-        ) as interface:
-            monitor = Monitor(self._wlan, interface)
-            await monitor.bind()
+            phyname, ifname, nl80211.NL80211_IFTYPE_MONITOR, flags
+        ) as attributes:
+            index = attributes[nl80211.NL80211_ATTR_IFINDEX]
+            address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
+            
+            monitor = Monitor(self._wlan, self._router, ifname, index, address)
+            await monitor.activate()
             yield monitor
     
     @contextlib.asynccontextmanager
     async def connect_network(
-        self, phy: str, name: str, ssid: str, channel: int, key: bytes | None
-    ) -> AsyncIterator[STAInterface]:
+        self, phyname: str, ifname: str, ssid: str, channel: int,
+        key: bytes | None
+    ) -> AsyncIterator[Station]:
         """
         Creates an interface in station mode and connects it to the given SSID.
         """
-        iftype = nl80211.NL80211_IFTYPE_STATION
-        async with self._create_interface(phy, name, iftype) as interface:
-            sta = STAInterface(self._wlan, interface, ssid, channel, key)
+        async with self._create_interface(
+            phyname, ifname, nl80211.NL80211_IFTYPE_STATION
+        ) as attributes:
+            index = attributes[nl80211.NL80211_ATTR_IFINDEX]
+            address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
+
+            sta = Station(
+                self._wlan, self._router, ifname, index, address, ssid, channel,
+                key
+            )
             async with sta.connect():
                 yield sta
     
     @contextlib.asynccontextmanager
-    async def create_network(
-        self, phy: str, name: str, ssid: str, channel: int, key: bytes | None,
-        max_stations: int
-    ) -> AsyncIterator[APInterface]:
-        """Creates an interface in AP mode and opens an access point."""
-        iftype = nl80211.NL80211_IFTYPE_AP
-        async with self._create_interface(phy, name, iftype) as interface:
-            ap = APInterface(
-                self._wlan, interface, ssid, channel, key, max_stations
+    async def create_p2p_group_owner(
+        self, phyname: str, ifname: str, ssid: str, channel: int,
+        key: bytes | None, max_stations: int
+    ) -> AsyncIterator[P2PGroupOwner]:
+        """
+        Creates an interface in IBSS mode with the given SSID.
+        """
+        async with self._create_interface(
+            phyname, ifname, nl80211.NL80211_IFTYPE_P2P_GO
+        ) as attributes:
+            index = attributes[nl80211.NL80211_ATTR_IFINDEX]
+            address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
+
+            ibss = P2PGroupOwner(
+                self._wlan, self._router, ifname, index, address, ssid, channel,
+                key, max_stations
             )
-            async with ap.start():
-                yield ap
+            async with ibss.create():
+                yield ibss
+    
+    @contextlib.asynccontextmanager
+    async def _create_interface(
+        self, phyname: str, ifname: str, type: int,
+        extra: dict[int, typing.Any] = {}
+    ) -> AsyncIterator[dict[int, typing.Any]]:
+        """
+        Creates an interface on the given phy, with the given name, type and
+        additional attributes.
+
+        The interface is deleted when the context manager exits.
+
+        Returns the attributes of the newly created interface.
+        """
+        wiphy = await self._get_wiphy_index(phyname)
+
+        attrs = {
+            nl80211.NL80211_ATTR_WIPHY: wiphy,
+            nl80211.NL80211_ATTR_IFNAME: ifname,
+            nl80211.NL80211_ATTR_IFTYPE: type,
+        }
+        attrs.update(extra)
         
-    async def _get_wiphy_index(self, name) -> int:
+        messages = await self._wlan.request(
+            nl80211.NL80211_CMD_NEW_INTERFACE, attrs
+        )
+        attributes = messages[0].attributes
+        index = attributes[nl80211.NL80211_ATTR_IFINDEX]
+        try:
+            yield attributes
+        finally:
+            attrs = {nl80211.NL80211_ATTR_IFINDEX: index}
+            await self._wlan.request(nl80211.NL80211_CMD_DEL_INTERFACE, attrs)
+    
+    async def _get_wiphy_index(self, name: str) -> int:
         """Returns the PHY index with the given name."""
         messages = await self._wlan.request(
             nl80211.NL80211_CMD_GET_WIPHY, flags=netlink.NLM_F_DUMP
@@ -1445,41 +1878,13 @@ class WLAN:
                 return message.attributes[nl80211.NL80211_ATTR_WIPHY]
         raise ValueError(f"No wiphy found with name '{name}'")
 
-    @contextlib.asynccontextmanager
-    async def _create_interface(
-        self, phy: str, name: str, type: int, extra: dict[int, typing.Any] = {}
-    ) -> AsyncIterator[Interface]:
-        """
-        Creates an interface on the given phy, with the given name, type and
-        additional attributes.
-
-        The interface is deleted when the context manager exits.
-        """
-        index = await self._get_wiphy_index(phy)
-        attrs = {
-            nl80211.NL80211_ATTR_WIPHY: index,
-            nl80211.NL80211_ATTR_IFNAME: name,
-            nl80211.NL80211_ATTR_IFTYPE: type,
-        }
-        attrs.update(extra)
-        
-        messages = await self._wlan.request(
-            nl80211.NL80211_CMD_NEW_INTERFACE, attrs
-        )
-        interface = Interface(self._wlan, messages[0].attributes)
-        try:
-            interface.up()
-            yield interface
-        finally:
-            attrs = {nl80211.NL80211_ATTR_IFINDEX: interface.index}
-            await self._wlan.request(nl80211.NL80211_CMD_DEL_INTERFACE, attrs)
-
 
 @contextlib.asynccontextmanager
-async def create() -> AsyncIterator[WLAN]:
+async def create_factory() -> AsyncIterator[Factory]:
     """
     Establishes an nl80211 connection with the kernel and returns a factory for
     wireless interfaces.
     """
     async with nl80211.connect() as wlan:
-        yield WLAN(wlan)
+        async with route.connect() as router:
+            yield Factory(wlan, router)

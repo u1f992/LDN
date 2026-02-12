@@ -11,7 +11,6 @@ from collections.abc import AsyncIterator
 from Crypto.Cipher import AES
 
 from ldn import streams, wlan, queue, util
-from netlink import route
 
 from dataclasses import dataclass, field
 
@@ -1282,7 +1281,7 @@ class STANetwork:
     def broadcast_address(self) -> str:
         return f"169.254.{self._network_id}.255"
     
-    async def next_event(self) -> object:
+    async def next_event(self) -> EventType:
         return await self._events.get()
     
     @contextlib.asynccontextmanager
@@ -1568,7 +1567,7 @@ class APNetwork:
             await self._interface.remove_station(participant.mac_address)
             await self._process_disassociation(participant.mac_address)
     
-    async def next_event(self) -> object:
+    async def next_event(self) -> EventType:
         return await self._events.get()
     
     @contextlib.asynccontextmanager

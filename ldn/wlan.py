@@ -1103,6 +1103,7 @@ class Monitor(Interface):
     _socket: trio.socket.SocketType
 
     _filter: MACAddress | None
+    _lock: trio.Lock
     
     def __init__(
         self, wlan: nl80211.NL80211, router: route.RouteController, name: str,
@@ -1115,6 +1116,7 @@ class Monitor(Interface):
         )
 
         self._filter = None
+        self._lock = trio.Lock()
     
     def set_filter(self, filter: MACAddress | str | None) -> None:
         """This method can be used to filter incoming frames on BSSID."""
@@ -1167,8 +1169,9 @@ class Monitor(Interface):
     
     async def send_frame(self, frame: FrameType) -> None:
         """Sends an IEEE 802.11 through the underlying interface."""
-        radiotap = RadiotapFrame(frame.encode())
-        await self.send(radiotap)
+        async with self._lock:
+            radiotap = RadiotapFrame(frame.encode())
+            await self.send(radiotap)
     
     def _parse_frame(self, data: bytes) -> FrameType | None:
         """

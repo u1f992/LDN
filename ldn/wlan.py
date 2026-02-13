@@ -32,9 +32,17 @@ logger = logging.getLogger(__name__)
 SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
 
+TUNSETIFF = 0x400454CA
+
 IFF_UP = 1
 
+IFF_TUN = 1
+IFF_TAP = 2
+IFF_NO_PI = 0x1000
+
 ETH_P_ALL = 3
+ETH_P_IP = 0x800
+ETH_P_ARP = 0x806
 ETH_P_OUI = 0x88B7
 
 
@@ -797,13 +805,18 @@ class DataFrame:
         self.source = header.address2
         self.bssid = header.address3
 
+        # This is a bit ugly, but apparently the driver may decrypt the frame
+        # without clearing the protected bit?
+        if stream.peek(3) == b"\xAA\xAA\x03":
+            self.protected = False
+
         if self.protected:
             nonce = stream.u16()
             extra = stream.u16()
             nonce |= stream.u32() << 16
 
             self.nonce = nonce
-            self.keyid = (extra >> 6) & 3
+            self.keyid = (extra >> 14) & 3
             if not extra & 0x2000:
                 raise ValueError("Ext IV was expected in protected frame")
 
@@ -821,7 +834,7 @@ class DataFrame:
         stream.write(header.encode())
 
         if self.protected:
-            extra = 0x20 | (self.keyid) << 6
+            extra = 0x2000 | (self.keyid) << 14
             stream.u16(self.nonce & 0xFFFF)
             stream.u16(extra)
             stream.u32(self.nonce >> 16)
@@ -906,6 +919,29 @@ class SNAPHeader:
         return stream.get()
 
 
+@dataclass
+class EthernetFrame:
+    target: MACAddress = MACAddress()
+    source: MACAddress = MACAddress()
+    protocol: int = 0
+    payload: bytes = b""
+
+    def decode(self, data: bytes) -> None:
+        stream = streams.StreamIn(data, ">")
+        self.target = MACAddress(stream.read(6))
+        self.source = MACAddress(stream.read(6))
+        self.protocol = stream.u16()
+        self.payload = stream.readall()
+
+    def encode(self) -> bytes:
+        stream = streams.StreamOut(">")
+        stream.write(self.target.encode())
+        stream.write(self.source.encode())
+        stream.u16(self.protocol)
+        stream.write(self.payload)
+        return stream.get()
+
+
 FrameTypes: dict[int, type[FrameType]] = {
     IEEE80211_STYPE_ASSOC_REQ: AssociationRequest,
     IEEE80211_STYPE_ASSOC_RESP: AssociationResponse,
@@ -973,10 +1009,6 @@ class Interface:
 
         self._socket = trio.socket.socket()
     
-    def up(self) -> None:
-        """Marks the interface as 'up', changing it to a running state."""
-        self._setflags(self._getflags() | IFF_UP)
-    
     def disable_ipv6(self) -> None:
         """Disables IPv6 on the interface."""
         filename = f"/proc/sys/net/ipv6/conf/{self._name}/disable_ipv6"
@@ -993,6 +1025,20 @@ class Interface:
         if self._address is None:
             raise ValueError("This interface does not have a MAC address")
         return self._address
+    
+    async def up(self) -> None:
+        """Marks the interface as 'up', changing it to a running state."""
+        await self._router.update_link(
+            socket.AF_UNSPEC, 0, self._index, IFF_UP, IFF_UP, {}
+        )
+    
+    async def update_link(self, address: MACAddress) -> None:
+        attrs = {
+            route.IFLA_ADDRESS: address.encode()
+        }
+        await self._router.update_link(
+            socket.AF_UNSPEC, 0, self._index, 0, 0, attrs
+        )
     
     async def add_address(
         self, local: str, broadcast: str, prefix: int = 24
@@ -1045,19 +1091,6 @@ class Interface:
             nl80211.NL80211_ATTR_FRAME_MATCH: match
         }
         await self._wlan.request(nl80211.NL80211_CMD_REGISTER_FRAME, attrs)
-    
-    def _getflags(self) -> int:
-        """Requests the active flags of the interface."""
-        req = struct.pack("16sH", self._name.encode(), 0)
-        res = fcntl.ioctl(self._socket.fileno(), SIOCGIFFLAGS, req)
-        return struct.unpack_from("H", res, 16)[0]
-    
-    def _setflags(self, flags: int) -> None:
-        """Sets the active flags on the interface."""
-        # This is really slow, but there doesn't seem to be
-        # an async implementation of fcntl.ioctl :(
-        req = struct.pack("16sH", self._name.encode(), flags)
-        fcntl.ioctl(self._socket.fileno(), SIOCSIFFLAGS, req)
 
 
 class Monitor(Interface):
@@ -1096,7 +1129,7 @@ class Monitor(Interface):
         method must be called exactly once before radiotap frames can be
         received.
         """
-        self.up()
+        await self.up()
         await self._socket.bind((self.name(), 0))
     
     async def recv(self) -> RadiotapFrame:
@@ -1212,7 +1245,7 @@ class Station(Interface):
         complete, or raises an exception if the connection fails. Disconnects
         from the network when the context manager exits.
         """
-        self.up()
+        await self.up()
         self.disable_ipv6()
         async with self._connect_network():
             async with util.background_task(self._process_messages):
@@ -1353,8 +1386,8 @@ class Station(Interface):
         await self._wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
 
 
-class P2PGroupOwner(Interface):
-    """This class represents a P2P group owner interface."""
+class AccessPoint(Interface):
+    """This class represents a access point interface."""
 
     _interface: Interface
 
@@ -1395,7 +1428,7 @@ class P2PGroupOwner(Interface):
         Starts an access point on the underlying interface. The access point is
         stopped when the context manager exits.
         """
-        self.up()
+        await self.up()
         self.disable_ipv6()
         async with self._start_ap():
             for type in [
@@ -1420,19 +1453,6 @@ class P2PGroupOwner(Interface):
                 struct.pack("H", ETH_P_OUI)
         }
         await self._wlan.request(nl80211.NL80211_CMD_CONTROL_PORT_FRAME, attrs)
-    
-    async def set_authorized(self, addr: MACAddress) -> None:
-        """
-        Marks the station with the given address as being authorized on the
-        network.
-        """
-        flag = 1 << nl80211.NL80211_STA_FLAG_AUTHORIZED
-        attrs = {
-            nl80211.NL80211_ATTR_IFINDEX: self.index(),
-            nl80211.NL80211_ATTR_MAC: addr.encode(),
-            nl80211.NL80211_ATTR_STA_FLAGS2: struct.pack("II", flag, flag)
-        }
-        await self._wlan.request(nl80211.NL80211_CMD_SET_STATION, attrs)
     
     async def remove_station(self, addr: MACAddress) -> None:
         """Removes the station with the given address from the network."""
@@ -1757,6 +1777,23 @@ class P2PGroupOwner(Interface):
         await self._wlan.request(nl80211.NL80211_CMD_FRAME, attrs)
 
 
+class Tap(Interface):
+    _file: trio._file_io.AsyncIOWrapper
+
+    def __init__(
+        self, wlan: nl80211.NL80211, router: route.RouteController, ifname: str,
+        address: MACAddress, file: trio._file_io.AsyncIOWrapper
+    ):
+        super().__init__(wlan, router, ifname, address=address)
+        self._file = file
+    
+    async def write(self, data: bytes) -> None:
+        await self._file.write(data)
+    
+    async def read(self) -> bytes:
+        return await self._file.read(4096)
+
+
 class Factory:
     """Acts as a factory for WLAN Interfaces"""
 
@@ -1815,25 +1852,39 @@ class Factory:
                 yield sta
     
     @contextlib.asynccontextmanager
-    async def create_p2p_group_owner(
+    async def create_ap(
         self, phyname: str, ifname: str, ssid: str, channel: int,
         key: bytes | None, max_stations: int
-    ) -> AsyncIterator[P2PGroupOwner]:
+    ) -> AsyncIterator[AccessPoint]:
         """
         Creates an interface in IBSS mode with the given SSID.
         """
         async with self._create_interface(
-            phyname, ifname, nl80211.NL80211_IFTYPE_P2P_GO
+            phyname, ifname, nl80211.NL80211_IFTYPE_AP
         ) as attributes:
             index = attributes[nl80211.NL80211_ATTR_IFINDEX]
             address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
 
-            ibss = P2PGroupOwner(
+            ibss = AccessPoint(
                 self._wlan, self._router, ifname, index, address, ssid, channel,
                 key, max_stations
             )
             async with ibss.create():
                 yield ibss
+    
+    @contextlib.asynccontextmanager
+    async def create_tap(
+        self, ifname: str, address: MACAddress
+    ) -> AsyncIterator[Tap]:
+        file = await trio.open_file("/dev/net/tun", "rb+", buffering=0)
+        async with file:
+            request = struct.pack("16sH", ifname.encode(), IFF_TAP | IFF_NO_PI)
+            fcntl.ioctl(file.fileno(), TUNSETIFF, request)
+
+            tap = Tap(self._wlan, self._router, ifname, address, file)
+            await tap.update_link(address)
+            await tap.up()
+            yield tap
     
     @contextlib.asynccontextmanager
     async def _create_interface(

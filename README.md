@@ -5,6 +5,8 @@ This package is able to scan for nearby LDN networks, join them, and even host y
 
 This package can be installed with `pip install ldn`.
 
+There is also a [Discord server](https://discord.gg/x8np6Hhxwk).
+
 ### Documentation
 * [The communication protocol (LDN)](https://github.com/kinnay/NintendoClients/wiki/LDN-Protocol)
 * [The classes and functions in this package](https://ldn.readthedocs.io)

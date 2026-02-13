@@ -1863,7 +1863,7 @@ class APNetwork:
         frame.payload = data
         frame.fromds = True
         if self._key:
-            self._data_nonce += 2
+            self._data_nonce += 1
             keyid = 1 if target == MACAddress("ff:ff:ff:ff:ff:ff") else 0
             frame.encrypt(self._key, self._data_nonce, keyid)
         await self._monitor.send_frame(frame)

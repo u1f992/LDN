@@ -1810,9 +1810,6 @@ class APNetwork:
                 try:
                     await self._process_data_frame(frame)
                 except Exception as e:
-                    if "MAC check failed" not in str(e):
-                        import traceback
-                        traceback.print_exc()
                     pass # Ignore invalid frames
     
     async def _transmit_data_frames(self) -> None:

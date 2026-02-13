@@ -18,3 +18,10 @@ It is important that no other software interferes with your network hardware. Yo
 
 ### Troubleshooting
 Using LDN is hard. Check out the list of [common issues](https://github.com/kinnay/LDN/wiki/Common-Issues). If your problem is still not solved, feel free to create an issue on github.
+
+### Design Considerations
+The LDN protocol is neither ad-hoc nor infrastructure, but somewhere in between. When a station joins the network, it must first authenticate and associate itself with the AP. Once authenticated, all nodes in the network can communicate directly with each other. It also seems that frames from the host have FromDS enabled, while frames from other stations in the network have neither FromDS nor ToDS enabled.
+
+Joining a network has never been an issue, but this protocol makes it difficult to implement an AP. Initially, this package attempted to use an interface in AP mode for hosting a network. However, in AP mode, it is impossible to receive frames that are sent to the broadcast address (`ff:ff:ff:ff:ff:ff`). These are dropped by either the kernel or the driver. Using an interface in IBSS (ad-hoc) mode also did not work, because all association requests are dropped in that mode.
+
+Currently, the package attempts to use a combination of AP mode and monitor mode. Network management frames (probe requests, association requests, etc.) are handled by the AP interface. The monitor mode interface is used to receive and send data frames, including those that are sent to the broadcast address. The data frames are parsed, decrypted and written to a TAP interface so that Linux becomes aware of them. This seems to work quite well, except that the Nintendo Switch currently seems to stop receiving UDP packets after receiving around 12 of them. This is a work in progress.

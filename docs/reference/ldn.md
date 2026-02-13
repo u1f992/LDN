@@ -159,6 +159,8 @@ Implements the local wireless protocol used by the Nintendo Switch.
 <span class="docs">The interface name for the access point. The interface names must not already be in use.</span><br>
 `ifname_monitor: str = "ldn-mon"`<br>
 <span class="docs">The interface name for the monitor. The interface names must not already be in use.</span><br>
+`ifname_tap: str = "ldn-tap"`<br>
+<span class="docs">A name for the TAP interface. The interface names must not already be in use.</span><br>
 `phyname: str = "phy0"`<br>
 <span class="docs">The name of the wiphy on which the access point interface are created.</span>
 `phyname_monitor: str = "phy0"`<br>

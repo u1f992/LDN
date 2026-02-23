@@ -1825,8 +1825,8 @@ class APNetwork:
             snap.protocol = ethernet.protocol
             snap.payload = ethernet.payload
 
-            await self._send_data_frame(snap.encode())
-    
+            await self._send_data_frame(snap.encode(), ethernet.source)
+
     async def _process_data_frame(self, frame: wlan.DataFrame) -> None:
         if frame.protected:
             if self._key is None:
@@ -1854,12 +1854,12 @@ class APNetwork:
         header.payload = snap.payload
         await self._tap.write(header.encode())
     
-    async def _send_data_frame(self, data: bytes) -> None:
-        # We are simply sending all frames to the broadcast address here.
+    async def _send_data_frame(self, data: bytes, source: "MACAddress | None" = None) -> None:
+        # FromDS: Address1=DA(broadcast), Address2=BSSID(AP), Address3=SA(original sender)
         frame = wlan.DataFrame()
         frame.target = MACAddress("ff:ff:ff:ff:ff:ff")
         frame.source = self._monitor.address()
-        frame.bssid = self._monitor.address()
+        frame.bssid = source if source else self._monitor.address()
         frame.payload = data
         frame.fromds = True
         if self._key:

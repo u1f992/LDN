@@ -1849,7 +1849,7 @@ class APNetwork:
         
         header = wlan.EthernetFrame()
         header.source = frame.source
-        header.target = frame.bssid
+        header.target = MACAddress("ff:ff:ff:ff:ff:ff")
         header.protocol = snap.protocol
         header.payload = snap.payload
         await self._tap.write(header.encode())

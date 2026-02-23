@@ -1044,13 +1044,15 @@ class ConnectNetworkParam:
     override_data_key: bytes | None = None
     override_advertise_key: bytes | None = None
 
+    address: MACAddress | None = None
+
     def check(self) -> None:
         if self.network.address == MACAddress():
             raise ValueError("network is invalid")
 
         if self.network.version not in [2, 3, 4]:
             raise ValueError("Network version not supported")
-        
+
         if not self.keys:
             raise ValueError("keys are required")
 
@@ -1847,7 +1849,7 @@ class APNetwork:
         
         header = wlan.EthernetFrame()
         header.source = frame.source
-        header.target = frame.target
+        header.target = frame.bssid
         header.protocol = snap.protocol
         header.payload = snap.payload
         await self._tap.write(header.encode())
@@ -1920,7 +1922,7 @@ async def connect(param: ConnectNetworkParam) -> AsyncIterator[STANetwork]:
     async with wlan.create_factory() as factory:
         async with factory.connect_network(
             param.phyname, param.ifname, network.ssid.hex(), network.channel,
-            wlan_key
+            wlan_key, address=param.address
         ) as interface:
             sta = STANetwork(interface, param, key_derivation)
             async with sta.start():

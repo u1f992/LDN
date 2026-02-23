@@ -1836,16 +1836,25 @@ class Factory:
     @contextlib.asynccontextmanager
     async def connect_network(
         self, phyname: str, ifname: str, ssid: str, channel: int,
-        key: bytes | None
+        key: bytes | None, address: "MACAddress | None" = None
     ) -> AsyncIterator[Station]:
         """
         Creates an interface in station mode and connects it to the given SSID.
+        If address is specified, the MAC address is changed before connecting.
         """
         async with self._create_interface(
             phyname, ifname, nl80211.NL80211_IFTYPE_STATION
         ) as attributes:
             index = attributes[nl80211.NL80211_ATTR_IFINDEX]
-            address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
+
+            if address is not None:
+                # Change MAC while interface is DOWN (before connect brings it UP)
+                attrs = {route.IFLA_ADDRESS: address.encode()}
+                await self._router.update_link(
+                    socket.AF_UNSPEC, 0, index, 0, 0, attrs
+                )
+            else:
+                address = MACAddress(attributes[nl80211.NL80211_ATTR_MAC])
 
             sta = Station(
                 self._wlan, self._router, ifname, index, address, ssid, channel,

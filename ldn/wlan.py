@@ -1211,17 +1211,20 @@ class Station(Interface):
 
     _events: queue.Queue[EventType]
     
+    _bssid: "MACAddress | None"
+
     def __init__(
         self, wlan: nl80211.NL80211, router: route.RouteController, name: str,
         index: int, address: MACAddress, ssid: str, channel: int,
-        key: bytes | None
+        key: bytes | None, bssid: "MACAddress | None" = None
     ):
         super().__init__(wlan, router, name, index, address)
-        
+
         self._ssid = ssid
         self._channel = channel
         self._key = key
-        
+        self._bssid = bssid
+
         self._host_address = None
         
         self._events = queue.create()
@@ -1312,13 +1315,16 @@ class Station(Interface):
             nl80211.NL80211_ATTR_WIPHY_FREQ: Channels[self._channel],
             nl80211.NL80211_ATTR_AUTH_TYPE:
                 nl80211.NL80211_AUTHTYPE_OPEN_SYSTEM,
-            
+
             nl80211.NL80211_ATTR_CONTROL_PORT: True,
             nl80211.NL80211_ATTR_CONTROL_PORT_ETHERTYPE:
                 struct.pack("H", ETH_P_OUI),
             nl80211.NL80211_ATTR_CONTROL_PORT_OVER_NL80211: True,
             nl80211.NL80211_ATTR_SOCKET_OWNER: True
         }
+
+        if self._bssid is not None:
+            attrs[nl80211.NL80211_ATTR_MAC] = bytes(self._bssid)
 
         if self._key is not None:
             attrs[nl80211.NL80211_ATTR_CIPHER_SUITES_PAIRWISE] = \
@@ -1836,11 +1842,13 @@ class Factory:
     @contextlib.asynccontextmanager
     async def connect_network(
         self, phyname: str, ifname: str, ssid: str, channel: int,
-        key: bytes | None, address: "MACAddress | None" = None
+        key: bytes | None, address: "MACAddress | None" = None,
+        bssid: "MACAddress | None" = None
     ) -> AsyncIterator[Station]:
         """
         Creates an interface in station mode and connects it to the given SSID.
         If address is specified, the MAC address is changed before connecting.
+        If bssid is specified, the connection targets that specific AP.
         """
         async with self._create_interface(
             phyname, ifname, nl80211.NL80211_IFTYPE_STATION
@@ -1858,7 +1866,7 @@ class Factory:
 
             sta = Station(
                 self._wlan, self._router, ifname, index, address, ssid, channel,
-                key
+                key, bssid
             )
             async with sta.connect():
                 yield sta

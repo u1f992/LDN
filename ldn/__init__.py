@@ -1942,7 +1942,7 @@ async def connect(param: ConnectNetworkParam) -> AsyncIterator[STANetwork]:
     async with wlan.create_factory() as factory:
         async with factory.connect_network(
             param.phyname, param.ifname, network.ssid.hex(), network.channel,
-            wlan_key, address=param.address
+            wlan_key, address=param.address, bssid=network.address
         ) as interface:
             sta = STANetwork(interface, param, key_derivation)
             async with sta.start():

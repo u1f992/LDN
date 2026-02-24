@@ -1246,6 +1246,11 @@ class STANetwork:
         self._network_id = 0
         self._participant_id = 0
     
+    @property
+    def ifindex(self) -> int:
+        """Returns the ifindex of the station interface."""
+        return self._interface.index()
+
     def _check_authentication_response(
         self, address: MACAddress, data: bytes
     ) -> bool:
@@ -1550,6 +1555,21 @@ class APNetwork:
         self._peers = []
 
         self._events = queue.create()
+    
+    @property
+    def ifindex(self) -> int:
+        """Returns the ifindex of the AP interface."""
+        return self._interface.index()
+
+    @property
+    def ifindex_monitor(self) -> int:
+        """Returns the ifindex of the monitor interface."""
+        return self._monitor.index()
+
+    @property
+    def ifindex_tap(self) -> int:
+        """Returns the ifindex of the TAP interface."""
+        return self._tap.index()
     
     def info(self) -> NetworkInfo:
         return self._network
